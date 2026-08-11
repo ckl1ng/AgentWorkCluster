@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$ROOT_DIR/chat-server"
 CLIENT_DIR="$ROOT_DIR/chat-client"
 RUNTIME_DIR="$ROOT_DIR/.runtime"
+SERVER_BIN="${CHAT_SERVER_BIN:-$SERVER_DIR/chat-server}"
 
 mkdir -p "$RUNTIME_DIR"
 if command -v flock >/dev/null 2>&1; then
@@ -35,8 +36,8 @@ report_failure() {
   case "$component" in
     "Chat Server")
       tail_logs "$component" "$SERVER_DIR/.runtime/chat-server.log" "$SERVER_DIR/.runtime/agent-api.log" "$SERVER_DIR/.runtime/agent-worker.log"
-      echo "建议：检查 chat-server/.agent.env 中的 AGENT_SERVICE_SECRET、AGENT_MASTER_KEY；确认已安装 Rust/Python 依赖；必要时运行：" >&2
-      echo "  cd $SERVER_DIR && cargo build --release" >&2
+      echo "建议：检查 chat-server/.agent.env 中的 AGENT_SERVICE_SECRET、AGENT_MASTER_KEY；确认已拉取仓库中的服务端二进制：" >&2
+      echo "  $SERVER_BIN" >&2
       echo "  python3 -m pip install -r $ROOT_DIR/agent-service/requirements.txt" >&2
       ;;
     "Chat Client")
@@ -68,6 +69,14 @@ run_component() {
   fi
 }
 
+if [[ ! -x "$SERVER_BIN" ]]; then
+  echo "未找到可执行的服务端二进制：$SERVER_BIN" >&2
+  echo "请确认已拉取包含 chat-server/chat-server 的仓库版本，或通过 CHAT_SERVER_BIN 指定路径。" >&2
+  exit 1
+fi
+
+export CHAT_SERVER_BIN="$SERVER_BIN"
+
 if ! run_component "Chat Server" "$SERVER_DIR/start.sh"; then
   exit 1
 fi
@@ -83,6 +92,7 @@ fi
 
 echo
 echo "全部组件已启动。"
+echo "服务端二进制: $SERVER_BIN"
 echo "前端: http://127.0.0.1:${VITE_PORT:-3000}"
 echo "服务端日志: $SERVER_DIR/.runtime/"
 echo "客户端日志: $CLIENT_DIR/.runtime/vite.log"
