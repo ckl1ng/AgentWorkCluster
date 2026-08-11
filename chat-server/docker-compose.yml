@@ -67,6 +67,38 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  qq-gateway:
+    build: ../qq-gateway
+    container_name: chat-qq-gateway
+    profiles: ["qq"]
+    environment:
+      - QQ_APP_ID=${QQ_APP_ID:-}
+      - QQ_CLIENT_SECRET=${QQ_CLIENT_SECRET:-}
+      - QQ_API_BASE_URL=${QQ_API_BASE_URL:-https://api.bot.qq.com}
+      - QQ_BOT_ID=${QQ_BOT_ID:-}
+      - QQ_DEFAULT_AGENT_ID=${QQ_DEFAULT_AGENT_ID:-}
+      - QQ_DEFAULT_OWNER_USER_ID=${QQ_DEFAULT_OWNER_USER_ID:-}
+      - QQ_GATEWAY_MASTER_KEY=${QQ_GATEWAY_MASTER_KEY:-}
+      - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
+      - QQ_AGENT_INTERNAL_URL=http://agent-api:9011
+      - QQ_GATEWAY_DATABASE_PATH=/data/qq-gateway.db
+      - QQ_WEBHOOK_SIGNATURE_MODE=${QQ_WEBHOOK_SIGNATURE_MODE:-ed25519}
+      - QQ_AGENT_RUN_TIMEOUT_SECONDS=${QQ_AGENT_RUN_TIMEOUT_SECONDS:-240}
+      - QQ_PASSIVE_REPLY_WINDOW_SECONDS=${QQ_PASSIVE_REPLY_WINDOW_SECONDS:-290}
+      - QQ_EVENT_RETRY_AFTER_SECONDS=${QQ_EVENT_RETRY_AFTER_SECONDS:-10}
+      - QQ_EVENT_RETRY_INTERVAL_SECONDS=${QQ_EVENT_RETRY_INTERVAL_SECONDS:-5}
+    volumes:
+      - qq-gateway-data:/data
+    depends_on:
+      agent-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9013/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
   redis:
     image: redis:7.4-alpine
     container_name: chat-agent-redis
@@ -107,3 +139,4 @@ volumes:
   chat-data:
   redis-data:
   postgres-data:
+  qq-gateway-data:

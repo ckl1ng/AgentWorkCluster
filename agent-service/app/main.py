@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, Field
@@ -385,6 +385,12 @@ class AgentStore:
                   event_type TEXT NOT NULL, payload TEXT NOT NULL, published_at TEXT, created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS outbox_events_pending_idx ON outbox_events (created_at) WHERE published_at IS NULL;
+                CREATE TABLE IF NOT EXISTS channel_event_deduplications (
+                  provider TEXT NOT NULL, bot_id TEXT NOT NULL, event_id TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                  owner_user_id INTEGER NOT NULL, created_at TEXT NOT NULL,
+                  PRIMARY KEY(provider, bot_id, event_id)
+                );
                 CREATE TABLE IF NOT EXISTS local_agent_devices (
                   id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL, display_name TEXT NOT NULL,
                   platform TEXT NOT NULL DEFAULT '', cli_version TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'offline',
@@ -458,7 +464,7 @@ class AgentStore:
             self.db.commit()
 
     def _ensure_builtin_tools(self) -> None:
-        """Install fixed tools for every owner and assign them to every Agent."""
+        """Install the built-in tool catalog for every owner without assigning it."""
         owners = {row[0] for row in self.db.execute("SELECT DISTINCT owner_user_id FROM agents").fetchall()}
         for owner_id in owners:
             for definition in BUILTIN_TOOLS:
@@ -481,11 +487,6 @@ class AgentStore:
                         (tool_id, owner_id, definition["name"], definition["description"], definition["kind"],
                          self._encrypt_json(definition["config"]), json.dumps(definition["input_schema"]),
                          definition["confirmation_mode"], definition["side_effect"], definition["provider_version"], timestamp, timestamp),
-                    )
-                for agent in self.db.execute("SELECT id FROM agents WHERE owner_user_id = ?", (owner_id,)).fetchall():
-                    self.db.execute(
-                        "INSERT INTO agent_tools (agent_id, tool_id, alias) VALUES (?, ?, ?) ON CONFLICT (agent_id, tool_id) DO NOTHING",
-                        (agent[0], tool_id, definition["name"]),
                     )
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -1291,6 +1292,13 @@ class AgentStore:
                 "SELECT * FROM task_assignments WHERE task_id = ? ORDER BY attempt DESC LIMIT 1", (task_id,)
             ).fetchone()
             task["current_assignment"] = self._assignment_public(assignment) if assignment else None
+            if assignment is not None:
+                run = self.db.execute(
+                    """SELECT id FROM runs WHERE task_id = ? AND assignment_id = ?
+                       ORDER BY created_at DESC LIMIT 1""", (task_id, assignment["id"]),
+                ).fetchone()
+                if run is not None:
+                    task["run_id"] = run["id"]
             task["unread_count"] = self._task_unread_count(task_id, owner_id)
         return task
 
@@ -1602,11 +1610,17 @@ class AgentStore:
                 required = ("target_agent_id", "title", "goal", "input_package", "reason")
                 if any(not isinstance(arguments.get(key), str) for key in required) or not isinstance(arguments.get("budget_snapshot"), dict):
                     return {"status": "error", "error": "delegate_task 参数无效"}
-                child = self.delegate_task(
-                    task_id, owner_id, principal, arguments["target_agent_id"], arguments["title"], arguments["goal"],
-                    arguments["input_package"], arguments["budget_snapshot"], arguments["reason"],
-                )
-                response = {"status": "ok", "task_id": task_id, "child_task_id": child["id"], "child_run_id": child.get("run_id")}
+                try:
+                    child = self.delegate_task(
+                        task_id, owner_id, principal, arguments["target_agent_id"], arguments["title"], arguments["goal"],
+                        arguments["input_package"], arguments["budget_snapshot"], arguments["reason"],
+                    )
+                except ValueError as exc:
+                    response = {"status": "error", "error": str(exc)}
+                except PermissionError as exc:
+                    response = {"status": "denied", "error": str(exc)}
+                else:
+                    response = {"status": "ok", "task_id": task_id, "child_task_id": child["id"], "child_run_id": child.get("run_id")}
             elif name == "collect_child_result":
                 child_task_id = arguments.get("child_task_id")
                 if not isinstance(child_task_id, str) or not child_task_id:
@@ -1675,23 +1689,10 @@ class AgentStore:
                    :memory_retention_days, :execution_target, :default_device_id, :default_workspace_id, :model_mode, :created_at, :updated_at)""",
                 record,
             )
-            self._ensure_builtin_tools_for_agent(agent_id, owner_id)
+            self._ensure_builtin_tools()
             self._insert_version(agent_id, 1, owner_id, record)
             self.db.commit()
         return self.get_agent(agent_id, owner_id, include_private=True)  # type: ignore
-
-    def _ensure_builtin_tools_for_agent(self, agent_id: str, owner_id: int) -> None:
-        """Create the owner's fixed tools when an Agent is created."""
-        self._ensure_builtin_tools()
-        for definition in BUILTIN_TOOLS:
-            row = self.db.execute(
-                "SELECT id FROM tools WHERE owner_user_id = ? AND name = ?", (owner_id, definition["name"])
-            ).fetchone()
-            if row:
-                self.db.execute(
-                    "INSERT INTO agent_tools (agent_id, tool_id, alias) VALUES (?, ?, ?) ON CONFLICT (agent_id, tool_id) DO NOTHING",
-                    (agent_id, row[0], definition["name"]),
-                )
 
     def _insert_version(self, agent_id: str, version: int, owner_id: int, record: Dict[str, Any]) -> None:
         snapshot = {
@@ -1786,7 +1787,7 @@ class AgentStore:
         return [self.get_tool(row["id"], owner_id, include_config=True) for row in rows]  # type: ignore
 
     def _ensure_builtin_tools_for_owner(self, owner_id: int) -> None:
-        # The owner may not have an Agent yet; still make the fixed catalog visible.
+        # The owner may not have an Agent yet; keep the built-in catalog visible.
         for definition in BUILTIN_TOOLS:
             existing = self.db.execute(
                 "SELECT id FROM tools WHERE owner_user_id = ? AND name = ?", (owner_id, definition["name"])
@@ -1807,11 +1808,6 @@ class AgentStore:
                     (tool_id, owner_id, definition["name"], definition["description"], definition["kind"],
                      self._encrypt_json(definition["config"]), json.dumps(definition["input_schema"]),
                      definition["confirmation_mode"], definition["side_effect"], definition["provider_version"], timestamp, timestamp),
-                )
-            for agent in self.db.execute("SELECT id FROM agents WHERE owner_user_id = ?", (owner_id,)).fetchall():
-                self.db.execute(
-                    "INSERT INTO agent_tools (agent_id, tool_id, alias) VALUES (?, ?, ?) ON CONFLICT (agent_id, tool_id) DO NOTHING",
-                    (agent[0], tool_id, definition["name"]),
                 )
 
     def _arguments_hash(self, arguments: Dict[str, Any]) -> str:
@@ -1921,13 +1917,6 @@ class AgentStore:
             if agent is None:
                 return None
             available = {row[0] for row in self.db.execute("SELECT id FROM tools WHERE owner_user_id = ? AND enabled = 1", (owner_id,)).fetchall()}
-            fixed = {row[0] for row in self.db.execute(
-                "SELECT id FROM tools WHERE owner_user_id = ? AND name IN (?, ?, ?)",
-                (owner_id, "current_time", "search_web", "read_url"),
-            ).fetchall()}
-            tool_ids = list(dict.fromkeys(list(tool_ids) + list(fixed)))
-            if len(tool_ids) > 32:
-                raise HTTPException(status_code=400, detail="工具列表超过上限（固定工具占用 3 个名额）")
             if not set(tool_ids).issubset(available):
                 raise HTTPException(status_code=400, detail="工具未找到或不可用")
             self.db.execute("DELETE FROM agent_tools WHERE agent_id = ?", (agent_id,))
@@ -2467,6 +2456,26 @@ All state-changing operations require structured, authorized tools and are check
             ).fetchone()
         return self._row(row)
 
+    def channel_event_result(self, provider: str, bot_id: str, event_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            row = self.db.execute(
+                """SELECT conversation_id, run_id FROM channel_event_deduplications
+                   WHERE provider = ? AND bot_id = ? AND event_id = ?""",
+                (provider, bot_id, event_id),
+            ).fetchone()
+        return self._row(row)
+
+    def remember_channel_event(self, provider: str, bot_id: str, event_id: str,
+                               conversation_id: str, run_id: str, owner_user_id: int) -> None:
+        with self.lock:
+            self.db.execute(
+                """INSERT INTO channel_event_deduplications
+                   (provider, bot_id, event_id, conversation_id, run_id, owner_user_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (provider, bot_id, event_id, conversation_id, run_id, owner_user_id, now()),
+            )
+            self.db.commit()
+
     def conversation_messages(self, conversation_id: str, owner_id: int) -> Optional[Dict[str, Any]]:
         conversation = self.get_conversation(conversation_id, owner_id)
         if conversation is None:
@@ -2991,6 +3000,14 @@ async def authenticated_user(authorization: Optional[str]) -> Dict[str, Any]:
     return await authenticate(authorization[7:].strip())
 
 
+async def authenticated_service(authorization: Optional[str]) -> None:
+    if not authorization or not authorization.startswith("Service "):
+        raise HTTPException(status_code=401, detail="缺少服务认证")
+    supplied = authorization[8:].strip()
+    if not supplied or not secrets.compare_digest(supplied, settings.service_secret):
+        raise HTTPException(status_code=401, detail="服务认证无效")
+
+
 async def authenticated_device(authorization: Optional[str]) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少设备 access token")
@@ -3085,6 +3102,21 @@ class ConversationPayload(BaseModel):
 
 class RunPayload(BaseModel):
     content: str = Field(min_length=1, max_length=50000)
+
+
+class ChannelEventPayload(BaseModel):
+    provider: str = Field(min_length=1, max_length=32)
+    bot_id: str = Field(min_length=1, max_length=128)
+    event_id: str = Field(min_length=1, max_length=256)
+    event_type: str = Field(min_length=1, max_length=80)
+    scope_type: str = Field(min_length=1, max_length=32)
+    scope_id: str = Field(min_length=1, max_length=256)
+    sender_id: str = Field(default="", max_length=256)
+    content: str = Field(min_length=1, max_length=50000)
+    agent_id: str = Field(min_length=1, max_length=128)
+    owner_user_id: int = Field(ge=1)
+    conversation_id: Optional[str] = Field(default=None, max_length=128)
+    title: str = Field(default="Channel conversation", max_length=120)
 
 
 class TaskPayload(BaseModel):
@@ -3215,6 +3247,59 @@ def validate_run_policy(policy: Dict[str, int]) -> Dict[str, int]:
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/internal/v1/channel-events")
+async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Create a Run for a trusted channel gateway without exposing user auth."""
+    await authenticated_service(authorization)
+    try:
+        payload = ChannelEventPayload.model_validate(raw_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Channel Event payload 无效") from exc
+    if payload.provider != "qq":
+        raise HTTPException(status_code=400, detail="暂不支持该 Channel Provider")
+    existing = database().channel_event_result(payload.provider, payload.bot_id, payload.event_id)
+    if existing is not None:
+        return {"provider": payload.provider, "event_id": payload.event_id, "conversation_id": existing["conversation_id"], "run_id": existing["run_id"], "duplicate": True}
+    agent = database().get_agent(payload.agent_id, payload.owner_user_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Channel 绑定的 Agent 未找到")
+    conversation = None
+    if payload.conversation_id:
+        conversation = database().get_conversation(payload.conversation_id, payload.owner_user_id)
+        if conversation is None or conversation["agent_id"] != payload.agent_id:
+            raise HTTPException(status_code=409, detail="Channel 会话映射无效")
+    else:
+        conversation = database().create_conversation(payload.agent_id, payload.owner_user_id, payload.title)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="无法创建 Channel 会话")
+    run = database().create_run(conversation["id"], payload.owner_user_id, payload.content.strip())
+    if run is None:
+        raise HTTPException(status_code=404, detail="Channel 会话未找到")
+    if run.get("error"):
+        raise HTTPException(status_code=409, detail=run["error"])
+    try:
+        database().remember_channel_event(
+            payload.provider, payload.bot_id, payload.event_id, conversation["id"], run["id"], payload.owner_user_id,
+        )
+    except database().db.integrity_error:
+        existing = database().channel_event_result(payload.provider, payload.bot_id, payload.event_id)
+        if existing is None:
+            raise
+        return {"provider": payload.provider, "event_id": payload.event_id, "conversation_id": existing["conversation_id"], "run_id": existing["run_id"], "duplicate": True}
+    if not run.get("local_dispatch"):
+        await enqueue_run(run["id"])
+    return {"provider": payload.provider, "event_id": payload.event_id, "conversation_id": conversation["id"], "run_id": run["id"]}
+
+
+@app.get("/internal/v1/channel-runs/{run_id}")
+async def get_channel_run(run_id: str, owner_user_id: int, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    await authenticated_service(authorization)
+    run = database().get_run(run_id, owner_user_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Channel Run 未找到")
+    return {"id": run["id"], "state": run["state"], "final_content": run.get("final_content", ""), "error_message": run.get("error_message", "")}
 
 
 @app.post("/api/v1/tools")

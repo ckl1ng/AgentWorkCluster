@@ -36,7 +36,7 @@ sudo install -m 644 deploy/systemd/*.service /etc/systemd/system/
 sudo caddy validate --config deploy/systemd/Caddyfile --adapter caddyfile
 sudo install -m 644 deploy/systemd/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl daemon-reload
-sudo systemctl enable --now chat-server agent-api agent-worker caddy
+sudo systemctl enable --now chat-server agent-api agent-worker qq-gateway caddy
 ```
 
 `agent-api` runs Alembic before every start; the separate `agent-migrate` unit is
@@ -47,7 +47,7 @@ before exposing Caddy:
 curl --fail http://127.0.0.1:9012/healthz
 curl --fail http://127.0.0.1:9011/healthz
 sudo ss -ltnp | rg ':9010|:9011|:9012|:5432|:6379'
-sudo journalctl -u chat-server -u agent-api -u agent-worker -u caddy -f
+sudo journalctl -u chat-server -u agent-api -u agent-worker -u qq-gateway -u caddy -f
 ```
 
 Use `systemctl restart chat-server agent-api agent-worker caddy` after updating

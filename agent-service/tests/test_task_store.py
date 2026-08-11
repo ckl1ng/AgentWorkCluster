@@ -216,6 +216,7 @@ class TaskStoreTest(unittest.TestCase):
         })
         self.assertEqual(delegated["status"], "ok")
         child = self.store.get_task(delegated["child_task_id"], 7)
+        self.assertEqual(child["run_id"], delegated["child_run_id"])
         self.assertEqual(child["parent_task_id"], parent["id"])
         self.assertEqual(child["root_task_id"], parent["id"])
         self.assertEqual(child["proposer_kind"], "agent")

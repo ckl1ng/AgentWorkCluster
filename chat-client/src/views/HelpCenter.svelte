@@ -4,7 +4,7 @@
   const dispatch = createEventDispatcher();
   const sections = [
     ['overview', '阅读说明'], ['start', '开始使用'], ['chat', '聊天与群组'],
-    ['agent', '云端 Agent'], ['local', '本地执行与 CLI'], ['tools', '工具与记忆'],
+    ['agent', '云端 Agent'], ['qq', 'QQ Bot 网关'], ['local', '本地执行与 CLI'], ['tools', '工具与记忆'],
     ['approval', '确认与取消'], ['runs', '运行与评估'], ['security', '安全与排错'],
   ];
   const cliCommands = [
@@ -23,7 +23,7 @@
 
 <section class="help" aria-label="帮助中心">
   <header>
-    <div><p>HELP CENTER</p><h2>使用指南</h2><span>聊天、受控 Agent 与本地执行器的完整操作说明</span></div>
+    <div><p>HELP CENTER</p><h2>使用指南</h2><span>聊天、受控 Agent、本地执行器与 QQ Bot 网关</span></div>
     <button type="button" class="close" title="返回消息" aria-label="返回消息" on:click={() => dispatch('close')}>×</button>
   </header>
 
@@ -59,6 +59,37 @@
         <h4>基础配置</h4>
         <ul><li><strong>模型连接：</strong>模型 ID、Base URL、温度、最大输出 Token 和超时。更新时 API Key 留空会保留已有密钥。</li><li><strong>上下文与预算：</strong>上下文窗口、并发运行、单次运行工具调用上限，以及每日和每月 Token 上限；预算填 <code>0</code> 表示不限制。</li><li><strong>运行状态：</strong>暂停后不能继续创建新运行；恢复后才能再次运行。</li></ul>
         <p>保存后在 Agent 会话中输入任务。运行以流式事件呈现；不要把模型的任何中间内容视为对外部系统已经完成的操作，应以最终回复、运行记录和工具结果为准。</p>
+      </section>
+
+      <section id="qq">
+        <p class="eyebrow">QQ BOT GATEWAY</p><h3>接入 QQ Bot</h3>
+        <p>QQ Bot 网关将 QQ 的群聊 @ 消息和私聊消息转成当前 Agent 的独立运行，再将最终回复回传 QQ。Gateway 只处理 QQ 平台连接、事件去重、会话映射和消息发送；Agent、Conversation、Run、工具和模型调用仍由 Agent 服务负责。</p>
+        <div class="callout"><strong>先准备目标 Agent</strong><span>先在本应用创建一个可正常运行的 Agent，记录它的 Agent ID 和所属账号的用户 ID。网关会把每个 QQ 群或私聊范围映射到该 Agent 的独立会话。</span></div>
+
+        <h4>配置服务端</h4>
+        <ol><li>在 QQ 开放平台创建机器人应用，取得 App ID、Client Secret 和 Bot ID，并确认当前官方文档要求的 Webhook 签名方式与事件订阅权限。</li><li>在部署机器的 <code>chat-server/.agent.env</code> 填写 QQ 配置。<code>AGENT_SERVICE_SECRET</code> 必须与 Agent 服务使用同一值；不要把该文件、AppSecret 或加密主密钥提交到仓库。</li><li>将 <code>QQ_GATEWAY_ENABLED</code> 设为 <code>true</code>。根目录启动脚本会在聊天服务和 Agent API 健康后启动 Gateway。</li></ol>
+        <pre><code>QQ_GATEWAY_ENABLED=true
+QQ_APP_ID=your-qq-app-id
+QQ_CLIENT_SECRET=your-qq-client-secret
+QQ_BOT_ID=your-qq-bot-id
+QQ_DEFAULT_AGENT_ID=your-agent-id
+QQ_DEFAULT_OWNER_USER_ID=your-owner-user-id
+QQ_GATEWAY_MASTER_KEY=your-fernet-key
+QQ_WEBHOOK_SIGNATURE_MODE=ed25519</code></pre>
+        <p>使用以下命令生成 <code>QQ_GATEWAY_MASTER_KEY</code>，并将生成值仅保存到部署环境：<code>python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'</code>。</p>
+
+        <h4>配置 QQ 平台回调</h4>
+        <p>生产环境需要将公网 HTTPS 地址配置为 <code>https://your-domain/qq/webhook/your-qq-bot-id</code>。Caddy 已将 <code>/qq/webhook*</code> 反向代理到根目录的 Gateway；不要把内部 Agent API 的 <code>9011</code> 端口暴露给 QQ 或公网。</p>
+        <p>在 QQ 平台订阅群聊 @ 消息和私聊消息事件。平台发送验证挑战时，Gateway 会返回所需的挑战响应。正式发布前，以 QQ 官方当前文档核对 API 域名、事件字段、Intents 与签名算法。</p>
+
+        <h4>启动与验证</h4>
+        <pre><code>cd /home/zhouzw/AgentWorkCluster
+./start.sh
+curl http://127.0.0.1:9013/healthz</code></pre>
+        <p>健康检查返回 <code>&#123;&quot;status&quot;:&quot;ok&quot;,&quot;configured&quot;:true&#125;</code> 后，再在 QQ 群中 @ 机器人或向机器人发送私聊消息。首次消息会创建会话，后续同一群或同一用户的消息复用该会话。</p>
+
+        <h4>运行与故障排查</h4>
+        <ul><li><strong>未配置时不启动：</strong>默认 <code>QQ_GATEWAY_ENABLED=false</code>，不会影响普通聊天、Agent 或前端启动。</li><li><strong>被动回复时限：</strong>QQ 事件超过被动回复窗口后会标记为过期，不会使用失效的消息 ID 重发。模型或工具耗时应保持在该时限内。</li><li><strong>重复消息：</strong>Gateway 按机器人和事件 ID 去重，Agent 服务也会保存相同的幂等键，避免重试产生重复运行或回复。</li><li><strong>Docker 部署：</strong>填写完整环境变量后使用 <code>docker compose --profile qq up -d</code> 启动可选的 QQ Gateway 服务。</li></ul>
       </section>
 
       <section id="local">
@@ -129,7 +160,7 @@ node bin/local-agent.js run attach run_xxx</code></pre>
 
       <section id="tools">
         <p class="eyebrow">GOVERNANCE</p><h3>工具与长期记忆</h3>
-        <p>工具不会因为创建而自动提供给模型。只有在“配置 → 工具与记忆”中分配给当前 Agent 的工具，才会进入后续运行快照。固定工具不能取消分配。</p>
+        <p>工具不会因为创建而自动提供给模型。只有在“配置 → 工具与记忆”中分配给当前 Agent 的工具，才会进入后续运行快照；预设工具也可以按 Agent 单独启用或取消。</p>
         <h4>创建工具</h4>
         <ul><li><strong>HTTP：</strong>填写 URL、方法、Headers、参数位置和输入 JSON Schema。只有 <code>GET</code>/<code>HEAD</code> 才适合 <code>read</code>。</li><li><strong>远程 MCP：</strong>填写 MCP 服务 URL 和远程工具名。发现结果只是候选，审阅后仍要确认副作用、确认策略、Schema 和限额。</li><li><strong>本地命令与 MCP STDIO：</strong>使用命令及 JSON 字符串数组参数。它们受既有工具策略约束，且与当前 Local Agent 的文本运行能力不同。</li><li><strong>副作用与确认：</strong><code>write</code> 必须选择“每运行确认”或“每次确认”；<code>destructive</code> 强制“每次确认”。每运行限额限制单次任务可调用次数。</li></ul>
         <h4>长期记忆</h4><p>长期记忆默认关闭。启用后，创建者可保存事实、偏好、档案、约束和经验，并设定 0 到 100 的重要度。只保存简短、可验证且会长期复用的信息；冲突项标为 <code>conflicted</code>，不会静默覆盖，应人工删除错误项。</p>
@@ -151,9 +182,9 @@ node bin/local-agent.js run attach run_xxx</code></pre>
       <section id="security">
         <p class="eyebrow">SECURITY &amp; TROUBLESHOOTING</p><h3>安全与故障排查</h3>
         <h4>必须遵守的边界</h4>
-        <ul><li>不要在聊天、提示词、工具描述、记忆、日志或截图中粘贴 API Key、Cookie、Bearer token、私钥或群密钥。</li><li>只把确实需要的工具分配给 Agent；未知 MCP 工具默认按写入处理并逐次确认。</li><li>本地工作区应只注册需要授权的项目目录。Local Agent 目前不会执行文件或进程工具，不要据此推断未来版本也会有相同默认权限。</li><li>工具网络访问受服务端策略限制；不要尝试通过 URL、重定向或 DNS 绕过私网和本地地址限制。</li></ul>
+        <ul><li>不要在聊天、提示词、工具描述、记忆、日志或截图中粘贴 API Key、Cookie、Bearer token、私钥、群密钥、QQ AppSecret 或 Gateway 加密主密钥。</li><li>只把确实需要的工具分配给 Agent；未知 MCP 工具默认按写入处理并逐次确认。</li><li>本地工作区应只注册需要授权的项目目录。Local Agent 目前不会执行文件或进程工具，不要据此推断未来版本也会有相同默认权限。</li><li>工具网络访问受服务端策略限制；不要尝试通过 URL、重定向或 DNS 绕过私网和本地地址限制。</li></ul>
         <h4>常见问题</h4>
-        <dl><dt><code>connect ENOENT ... daemon.sock</code></dt><dd>daemon 未启动或已退出。回到 <code>local-agent</code> 目录执行 <code>node bin/local-agent.js daemon</code>，并保持该进程运行。</dd><dt><code>local-agent daemon is already running</code></dt><dd>同一用户已有 daemon。使用已有实例；若它刚被异常中断，先确认原进程已停止，再重新启动。</dd><dt>配对码过期或网页批准失败</dt><dd>重新运行 <code>auth login</code> 获取新的会话 ID 和配对码，并确认网页登录的是要拥有该设备的账号。</dd><dt><code>workspace not found</code></dt><dd>终端运行必须使用 <code>workspace list</code> 返回的本地 <code>ws_...</code> ID，而不是网页中的远端工作区 ID。</dd><dt><code>no local model credential is configured</code></dt><dd>为相同 Agent ID 执行 <code>model set</code>，并确认配对、daemon 和环境变量均已就绪。</dd><dt>网页运行一直等待本机</dt><dd>检查设备在“本地执行”页是否在线、daemon 是否仍在运行、绑定的工作区是否已同步，并确认该 Agent 绑定为 <code>local_direct</code>。</dd></dl>
+        <dl><dt><code>connect ENOENT ... daemon.sock</code></dt><dd>daemon 未启动或已退出。回到 <code>local-agent</code> 目录执行 <code>node bin/local-agent.js daemon</code>，并保持该进程运行。</dd><dt><code>local-agent daemon is already running</code></dt><dd>同一用户已有 daemon。使用已有实例；若它刚被异常中断，先确认原进程已停止，再重新启动。</dd><dt>配对码过期或网页批准失败</dt><dd>重新运行 <code>auth login</code> 获取新的会话 ID 和配对码，并确认网页登录的是要拥有该设备的账号。</dd><dt><code>workspace not found</code></dt><dd>终端运行必须使用 <code>workspace list</code> 返回的本地 <code>ws_...</code> ID，而不是网页中的远端工作区 ID。</dd><dt><code>no local model credential is configured</code></dt><dd>为相同 Agent ID 执行 <code>model set</code>，并确认配对、daemon 和环境变量均已就绪。</dd><dt>网页运行一直等待本机</dt><dd>检查设备在“本地执行”页是否在线、daemon 是否仍在运行、绑定的工作区是否已同步，并确认该 Agent 绑定为 <code>local_direct</code>。</dd><dt>QQ Gateway 健康检查未配置或启动失败</dt><dd>确认 <code>QQ_GATEWAY_ENABLED=true</code>、所有 <code>QQ_*</code> 变量、目标 Agent ID 和所属用户 ID 已填写；随后查看 <code>qq-gateway/.runtime/qq-gateway.log</code>。不要将其中的凭证复制到工单或聊天。</dd></dl>
       </section>
     </article>
   </div>

@@ -180,8 +180,8 @@
     {#if loading}<p class="muted">正在加载工具...</p>
     {:else}<div class="tool-list">
       {#each tools as item (item.id)}
-        <label class="tool-row"><input type="checkbox" checked={assigned.has(item.id)} disabled={item.builtin} on:change={() => toggleTool(item.id)} />
-          <span><strong>{item.name}{item.builtin ? ' · 固定' : ''}</strong><small>{item.kind} · {item.side_effect} · {item.confirmation_mode} · 每运行 {item.rate_limit_per_run} 次</small></span>
+        <label class="tool-row"><input type="checkbox" checked={assigned.has(item.id)} on:change={() => toggleTool(item.id)} />
+          <span><strong>{item.name}{item.builtin ? ' · 预设' : ''}</strong><small>{item.kind} · {item.side_effect} · {item.confirmation_mode} · 每运行 {item.rate_limit_per_run} 次</small></span>
         </label>
       {:else}<p class="muted">尚未创建工具</p>{/each}
     </div>{/if}

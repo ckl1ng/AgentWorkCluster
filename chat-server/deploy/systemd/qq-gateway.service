@@ -1,0 +1,26 @@
+[Unit]
+Description=QQ Agent Gateway
+After=network-online.target agent-api.service
+Requires=agent-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chat-server
+Group=chat-server
+WorkingDirectory=/opt/agentWorkCluster/qq-gateway
+EnvironmentFile=/etc/chat-server/agent.env
+Environment=QQ_GATEWAY_HOST=127.0.0.1
+Environment=QQ_GATEWAY_PORT=9013
+Environment=QQ_AGENT_INTERNAL_URL=http://127.0.0.1:9011
+ExecStart=/opt/agentWorkCluster/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9013
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chat-server
+
+[Install]
+WantedBy=multi-user.target

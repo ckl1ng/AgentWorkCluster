@@ -48,6 +48,16 @@ class LocalAgentStoreTest(unittest.TestCase):
         workspace = self.store.register_device_workspace(device["id"], {"display_name": "chat-server"})
         self.assertIsNone(workspace)
 
+    def test_channel_event_deduplication_is_scoped_to_provider_bot_and_event(self):
+        self.assertIsNone(self.store.channel_event_result("qq", "bot-a", "event-a"))
+        self.store.remember_channel_event("qq", "bot-a", "event-a", self.conversation["id"], "run-a", 7)
+
+        result = self.store.channel_event_result("qq", "bot-a", "event-a")
+        self.assertEqual(result, {"conversation_id": self.conversation["id"], "run_id": "run-a"})
+        self.assertIsNone(self.store.channel_event_result("qq", "bot-b", "event-a"))
+        with self.assertRaises(self.store.db.integrity_error):
+            self.store.remember_channel_event("qq", "bot-a", "event-a", self.conversation["id"], "run-b", 7)
+
     def test_local_run_creates_dispatch_without_cloud_outbox_event(self):
         device = self.store.create_local_device(7, {"display_name": "workstation", "platform": "linux"})
         workspace = self.store.add_local_workspace(7, device["id"], {"display_name": "chat-server"})

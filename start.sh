@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$ROOT_DIR/chat-server"
 CLIENT_DIR="$ROOT_DIR/chat-client"
+QQ_GATEWAY_DIR="$ROOT_DIR/qq-gateway"
 RUNTIME_DIR="$ROOT_DIR/.runtime"
 SERVER_BIN="${CHAT_SERVER_BIN:-$SERVER_DIR/chat-server}"
 
@@ -47,6 +48,10 @@ report_failure() {
       echo "  ss -ltnp | rg ':${VITE_PORT:-3000}'" >&2
       echo "  检查 chat-client/.frontend.env 中的 CHAT_SERVER_URL、AGENT_SERVER_URL。" >&2
       ;;
+    "QQ Gateway")
+      tail_logs "$component" "$QQ_GATEWAY_DIR/.runtime/qq-gateway.log"
+      echo "建议：检查 chat-server/.agent.env 中的 QQ_* 配置；QQ Gateway 依赖可执行的 Python 环境。" >&2
+      ;;
   esac
 }
 
@@ -77,8 +82,23 @@ fi
 
 export CHAT_SERVER_BIN="$SERVER_BIN"
 
+if [[ -f "$SERVER_DIR/.agent.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$SERVER_DIR/.agent.env"
+  set +a
+fi
+
 if ! run_component "Chat Server" "$SERVER_DIR/start.sh"; then
   exit 1
+fi
+
+if [[ "${QQ_GATEWAY_ENABLED:-false}" == "true" ]]; then
+  if ! run_component "QQ Gateway" "$QQ_GATEWAY_DIR/start.sh"; then
+    echo "QQ Gateway 失败，正在回收已启动的服务端，避免留下不完整进程。" >&2
+    "$SERVER_DIR/stop.sh" || true
+    exit 1
+  fi
 fi
 
 # Do not let the long-lived Vite process inherit the orchestration lock.
@@ -86,6 +106,9 @@ exec 9>&-
 
 if ! run_component "Chat Client" "$CLIENT_DIR/start.sh"; then
   echo "客户端失败，正在回收已启动的服务端，避免留下不完整进程。" >&2
+  if [[ "${QQ_GATEWAY_ENABLED:-false}" == "true" ]]; then
+    "$QQ_GATEWAY_DIR/stop.sh" || true
+  fi
   "$SERVER_DIR/stop.sh" || true
   exit 1
 fi

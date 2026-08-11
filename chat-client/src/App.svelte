@@ -481,8 +481,8 @@
   }
 
   .stage-shell { flex: 1; min-width: 0; display: flex; min-height: 0; }
-  .stage-surface { flex: 1; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--color-border); border-radius: 26px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%), var(--color-panel); backdrop-filter: blur(18px); box-shadow: var(--shadow-elevated); }
-  .view-stage { height: 100%; min-height: 0; }
+  .stage-surface { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; border: 1px solid var(--color-border); border-radius: 26px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 18%), var(--color-panel); backdrop-filter: blur(18px); box-shadow: var(--shadow-elevated); }
+  .view-stage { flex: 1; min-width: 0; min-height: 0; display: flex; }
   .home { height: 100%; overflow-y: auto; padding: clamp(28px, 6vh, 68px) clamp(18px, 5vw, 56px); }
   .home-hero { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.95fr); gap: 20px; align-items: stretch; margin-bottom: 24px; }
   .hero-copy, .metric-card, .home-section { border: 1px solid var(--color-border); border-radius: 22px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 100%), var(--color-panel-strong); box-shadow: var(--shadow-soft); }

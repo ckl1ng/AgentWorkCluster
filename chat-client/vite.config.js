@@ -17,9 +17,9 @@ export default defineConfig({
       '/api/v1/notifications': process.env.AGENT_SERVER_URL || 'http://127.0.0.1:9011',
       // Keep the browser on a same-origin relative API while allowing the
       // development server to run on a non-conflicting local port.
-      '/api': process.env.CHAT_SERVER_URL || 'http://127.0.0.1:9010',
+      '/api': process.env.CHAT_SERVER_URL || 'http://127.0.0.1:9012',
       '/ws': {
-        target: (process.env.CHAT_SERVER_URL || 'http://127.0.0.1:9010').replace(/^http/, 'ws'),
+        target: (process.env.CHAT_SERVER_URL || 'http://127.0.0.1:9012').replace(/^http/, 'ws'),
         ws: true,
       },
       '/agent/ws': {

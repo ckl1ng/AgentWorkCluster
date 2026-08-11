@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$ROOT_DIR/chat-server"
 CLIENT_DIR="$ROOT_DIR/chat-client"
+QQ_GATEWAY_DIR="$ROOT_DIR/qq-gateway"
 RUNTIME_DIR="$ROOT_DIR/.runtime"
 
 mkdir -p "$RUNTIME_DIR"
@@ -43,6 +44,9 @@ stop_component() {
 
 stop_status=0
 stop_component "Chat Client" "$CLIENT_DIR/stop.sh" || stop_status=1
+if [[ -x "$QQ_GATEWAY_DIR/stop.sh" ]]; then
+  stop_component "QQ Gateway" "$QQ_GATEWAY_DIR/stop.sh" || stop_status=1
+fi
 stop_component "Chat Server" "$SERVER_DIR/stop.sh" || stop_status=1
 
 if [[ "$stop_status" -eq 0 ]]; then
