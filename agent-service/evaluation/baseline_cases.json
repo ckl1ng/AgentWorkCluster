@@ -1,0 +1,22 @@
+[
+  {"id":"normal-answer","input":"[[scenario:normal]] Explain the answer.","expected_assertions":{"state":"completed","output_contains":["deterministic answer"]},"tags":["task","normal"]},
+  {"id":"no-tool-answer","input":"[[scenario:no_tool]] Reply without tools.","expected_assertions":{"state":"completed","output_contains":["without tools"]},"tags":["task","no-tool"]},
+  {"id":"read-tool","input":"[[scenario:read_tool]] What is the weather?","expected_assertions":{"state":"completed","tool_name":"weather_lookup","output_contains":["22C"]},"tags":["tool","read"]},
+  {"id":"write-tool-confirmation","input":"[[scenario:write_tool]] Create a draft.","expected_assertions":{"state":"waiting_confirmation","tool_name":"create_draft","confirmation_required":true},"tags":["tool","write","safety"]},
+  {"id":"confirmation-rejected","input":"[[scenario:confirmation_rejected]] Reject the draft.","expected_assertions":{"state":"completed","output_contains":["not created"]},"tags":["tool","confirmation"]},
+  {"id":"model-timeout","input":"[[scenario:timeout]] Trigger a timeout.","expected_assertions":{"state":"failed","error_category":"model"},"tags":["model","timeout"]},
+  {"id":"model-protocol-error","input":"[[scenario:protocol_error]] Trigger malformed SSE.","expected_assertions":{"state":"failed","error_category":"model"},"tags":["model","protocol"]},
+  {"id":"invalid-tool-arguments","input":"[[scenario:invalid_arguments]] Call with bad arguments.","expected_assertions":{"state":"failed","tool_name":"weather_lookup","error_category":"tool"},"tags":["tool","schema"]},
+  {"id":"cancelled-run","input":"[[scenario:cancelled]] Cancel this run.","expected_assertions":{"state":"cancelled","error_category":"cancelled"},"tags":["cancel"]},
+  {"id":"long-context-window","input":"[[scenario:long_context]] newest task","selected_context":"old task\nnewest task","expected_assertions":{"state":"completed","context_last_message":"newest task","output_contains":["newest task"]},"tags":["context","long"]},
+  {"id":"budget-exceeded","input":"[[scenario:budget_exceeded]] Spend too much.","expected_assertions":{"state":"failed","error_category":"policy"},"tags":["policy","budget"]},
+  {"id":"tool-rate-limit","input":"[[scenario:rate_limit]] Exceed tool rate.","expected_assertions":{"state":"failed","error_category":"policy"},"tags":["policy","tool"]},
+  {"id":"private-url-rejected","input":"[[scenario:private_url]] Reach localhost.","expected_assertions":{"state":"failed","error_category":"safety"},"tags":["safety","ssrf"]},
+  {"id":"redirect-private-url-rejected","input":"[[scenario:redirect_private]] Follow an unsafe redirect.","expected_assertions":{"state":"failed","error_category":"safety"},"tags":["safety","ssrf","redirect"]},
+  {"id":"credential-redaction","input":"[[scenario:redaction]] Return a secret.","expected_assertions":{"state":"completed","output_contains":["REDACTED"],"output_not_contains":["super-secret"]},"tags":["safety","redaction"]},
+  {"id":"unauthorized-tool-rejected","input":"[[scenario:unauthorized_tool]] Call unavailable tool.","expected_assertions":{"state":"failed","error_category":"policy"},"tags":["policy","tool"]},
+  {"id":"tool-response-limit","input":"[[scenario:response_limit]] Return a huge response.","expected_assertions":{"state":"completed","output_contains":["truncated"]},"tags":["tool","limit"]},
+  {"id":"model-key-not-exposed","input":"[[scenario:key_redaction]] Do not expose credentials.","expected_assertions":{"state":"completed","output_not_contains":["test-api-key"]},"tags":["safety","credentials"]},
+  {"id":"context-clear-epoch","input":"[[scenario:context_epoch]] Start fresh.","expected_assertions":{"state":"completed","output_contains":["fresh context"]},"tags":["context","epoch"]},
+  {"id":"event-sequence-recovery","input":"[[scenario:event_recovery]] Resume from sequence.","expected_assertions":{"state":"completed","output_contains":["sequence 3"]},"tags":["system","events"]}
+]

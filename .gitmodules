@@ -1,0 +1,6 @@
+[submodule "chat-client"]
+	path = chat-client
+	url = git@github.com:ckl1ng/chat-client.git
+[submodule "chat-server"]
+	path = chat-server
+	url = git@github.com:ckl1ng/chat-server.git

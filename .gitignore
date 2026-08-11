@@ -1,0 +1,21 @@
+# Local configuration and runtime state
+.env
+.env.*
+.agent.env
+.frontend.env
+.runtime/
+*.log
+*.pid
+
+# Build and dependency output
+node_modules/
+dist/
+target/
+__pycache__/
+*.py[cod]
+
+# Local databases and editor files
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
