@@ -64,6 +64,7 @@ class Settings:
         )
         self.service_secret = os.getenv("AGENT_SERVICE_SECRET", "")
         self.master_key = os.getenv("AGENT_MASTER_KEY", "")
+        self.qq_gateway_url = os.getenv("QQ_GATEWAY_INTERNAL_URL", "http://127.0.0.1:9013").rstrip("/")
         self.allow_http = os.getenv("AGENT_ALLOW_HTTP", "false").lower() == "true"
         self.tool_response_limit = int(os.getenv("AGENT_TOOL_RESPONSE_LIMIT", str(1024 * 1024)))
         self.redis_url = os.getenv("REDIS_URL", "")
@@ -3008,6 +3009,32 @@ async def authenticated_service(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="服务认证无效")
 
 
+async def qq_gateway_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Proxy a user-authorized QQ connection command to the private gateway."""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.request(
+                method, settings.qq_gateway_url + path,
+                json=payload,
+                headers={"Authorization": "Service " + settings.service_secret},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="QQ Gateway 当前不可用") from exc
+    if response.status_code >= 400:
+        detail = "QQ Gateway 请求失败"
+        try:
+            body = response.json()
+            detail = body.get("detail", body.get("error", detail)) if isinstance(body, dict) else detail
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="QQ Gateway 返回了无效响应") from exc
+    return body if isinstance(body, dict) else {"data": body}
+
+
 async def authenticated_device(authorization: Optional[str]) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="缺少设备 access token")
@@ -3057,6 +3084,13 @@ class AgentUpdatePayload(BaseModel):
     default_device_id: Optional[str] = Field(default=None, max_length=64)
     default_workspace_id: Optional[str] = Field(default=None, max_length=64)
     model_mode: Optional[str] = Field(default=None, pattern="^(server_proxy|local_direct)$")
+
+
+class QQConnectPayload(BaseModel):
+    app_id: str = Field(min_length=1, max_length=128)
+    client_secret: str = Field(min_length=1, max_length=256)
+    bot_id: Optional[str] = Field(default=None, max_length=128)
+    intents: int = Field(default=513, ge=1, le=4095)
 
 
 class LocalDevicePayload(BaseModel):
@@ -3538,6 +3572,43 @@ async def get_agent(agent_id: str, authorization: Optional[str] = Header(None)) 
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent 未找到")
     return agent
+
+
+@app.get("/api/v1/agents/{agent_id}/qq")
+async def get_agent_qq_connection(agent_id: str, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    user = await authenticated_user(authorization)
+    if database().get_agent(agent_id, user["user_id"]) is None:
+        raise HTTPException(status_code=404, detail="Agent 未找到")
+    try:
+        return await qq_gateway_request("GET", "/internal/v1/qq/connections/" + agent_id)
+    except HTTPException as exc:
+        if exc.status_code in {502, 503}:
+            return {"agent_id": agent_id, "status": "gateway_unavailable", "configured": False}
+        raise
+
+
+@app.post("/api/v1/agents/{agent_id}/qq")
+async def connect_agent_qq(agent_id: str, payload: QQConnectPayload, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    user = await authenticated_user(authorization)
+    if database().get_agent(agent_id, user["user_id"]) is None:
+        raise HTTPException(status_code=404, detail="Agent 未找到")
+    command = {
+        "agent_id": agent_id,
+        "owner_user_id": int(user["user_id"]),
+        "app_id": payload.app_id.strip(),
+        "client_secret": payload.client_secret,
+        "bot_id": (payload.bot_id or "").strip(),
+        "intents": payload.intents,
+    }
+    return await qq_gateway_request("POST", "/internal/v1/qq/connections", command)
+
+
+@app.delete("/api/v1/agents/{agent_id}/qq")
+async def disconnect_agent_qq(agent_id: str, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    user = await authenticated_user(authorization)
+    if database().get_agent(agent_id, user["user_id"]) is None:
+        raise HTTPException(status_code=404, detail="Agent 未找到")
+    return await qq_gateway_request("DELETE", "/internal/v1/qq/connections/" + agent_id)
 
 
 @app.post("/api/v1/agents/{agent_id}/local-bind")

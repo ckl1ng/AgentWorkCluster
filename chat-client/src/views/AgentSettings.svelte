@@ -14,6 +14,10 @@
   let loadingLocal = true;
   let bindingLocal = false;
   let approvingPairing = false;
+  let qqLoading = true;
+  let qqConnecting = false;
+  let qq = { configured: false, status: 'disconnected', bot_id: '', last_error: '' };
+  let qqForm = { appId: '', appSecret: '', botId: '', intents: 513 };
   let pairing = { id: '', code: '' };
   let local = {
     deviceId: agent.default_device_id || '',
@@ -42,8 +46,52 @@
   let activeTab = 'general';
 
   onMount(async () => {
-    await Promise.all([loadTools(), loadLocalDevices()]);
+    await Promise.all([loadTools(), loadLocalDevices(), loadQqConnection()]);
   });
+
+  async function loadQqConnection() {
+    qqLoading = true;
+    try {
+      qq = await api.getAgentQqConnection(agent.id);
+    } catch (e) {
+      qq = { configured: false, status: 'gateway_unavailable', bot_id: '', last_error: e.message || 'QQ Gateway 不可用' };
+    } finally {
+      qqLoading = false;
+    }
+  }
+
+  async function connectQq() {
+    if (!qqForm.appId.trim() || !qqForm.appSecret) {
+      error = '请输入 QQ AppID 和 AppSecret';
+      return;
+    }
+    qqConnecting = true;
+    error = '';
+    try {
+      qq = await api.connectAgentQq(agent.id, {
+        app_id: qqForm.appId.trim(), client_secret: qqForm.appSecret,
+        bot_id: qqForm.botId.trim() || undefined, intents: Number(qqForm.intents) || 513,
+      });
+      qqForm.appSecret = '';
+      window.setTimeout(loadQqConnection, 1500);
+    } catch (e) {
+      error = e.message || 'QQ Bot 连接失败';
+    } finally {
+      qqConnecting = false;
+    }
+  }
+
+  async function disconnectQq() {
+    qqConnecting = true;
+    error = '';
+    try {
+      qq = await api.disconnectAgentQq(agent.id);
+    } catch (e) {
+      error = e.message || 'QQ Bot 断开失败';
+    } finally {
+      qqConnecting = false;
+    }
+  }
 
   async function loadTools() {
     loadingTools = true;
@@ -187,7 +235,8 @@
 <section class="settings" aria-label="Agent 配置">
   <header><div><p>AGENT CONFIG</p><h2>{agent.name}</h2></div><button type="button" class="close" title="关闭配置" aria-label="关闭配置" on:click={() => dispatch('cancel')}>×</button></header>
   <nav class="tabs" aria-label="Agent 配置页签"><button type="button" class:active={activeTab === 'general'} on:click={() => activeTab = 'general'}>基础配置</button><button type="button" class:active={activeTab === 'local'} on:click={() => activeTab = 'local'}>本地执行</button><button type="button" class:active={activeTab === 'governance'} on:click={() => activeTab = 'governance'}>工具与记忆</button></nav>
-  {#if activeTab === 'general'}<form on:submit|preventDefault={save}>
+  {#if activeTab === 'general'}<form on:submit|preventDefault={save} novalidate>
+    <section class="qq-execution"><div class="section-title"><div><h3>QQ Bot 连接</h3><p class="muted">AppSecret 只提交到服务端加密的 QQ Gateway，不会保存到浏览器。</p></div><span class="qq-status" class:connected={qq.status === 'connected'} class:error-status={qq.status === 'error'}>{qqLoading ? '读取中' : qq.status === 'connected' ? '已连接' : qq.status === 'connecting' ? '连接中' : qq.status === 'gateway_unavailable' ? 'Gateway 不可用' : '未连接'}</span></div><div class="two"><label>AppID<input required maxlength="128" bind:value={qqForm.appId} placeholder="QQ 开放平台 AppID" autocomplete="off" /></label><label>AppSecret<input required type="password" maxlength="256" bind:value={qqForm.appSecret} placeholder="QQ 开放平台 AppSecret" autocomplete="new-password" /></label></div><div class="two"><label>Bot ID（可选）<input maxlength="128" bind:value={qqForm.botId} placeholder="留空则连接后自动识别" /></label><label>事件 Intents<input type="number" min="1" max="4095" bind:value={qqForm.intents} /></label></div><div class="local-actions"><button type="button" on:click={connectQq} disabled={qqConnecting || qqLoading}>{qqConnecting ? '正在连接...' : '一键连接 QQ Bot'}</button><button type="button" class="danger" on:click={disconnectQq} disabled={qqConnecting || !qq.configured}>断开连接</button></div>{#if qq.bot_id}<p class="muted">已识别 Bot ID：{qq.bot_id}</p>{/if}{#if qq.last_error}<p class="error" role="status">{qq.last_error}</p>{/if}</section>
     <section><div class="section-title"><h3>运行状态</h3><button type="button" class:danger={agent.state === 'active'} on:click={toggleState}>{agent.state === 'active' ? '暂停 Agent' : '恢复 Agent'}</button></div></section>
     <section><h3>基础信息</h3><div class="two"><label>名称<input required maxlength="80" bind:value={form.name} /></label><label>用途<input maxlength="280" bind:value={form.description} /></label></div></section>
     <section><h3>模型连接</h3><div class="two"><label>连接名称<input required bind:value={form.model_display_name} /></label><label>模型 ID<input required bind:value={form.model_id} /></label></div><label>Base URL<input required type="url" bind:value={form.base_url} /></label><label>替换 API Key<input type="password" autocomplete="new-password" bind:value={form.api_key} placeholder="留空则保持现有密钥" /></label><div class="three"><label>温度<input type="number" min="0" max="2" step="0.1" bind:value={form.temperature} /></label><label>输出 Token<input type="number" min="1" max="32768" bind:value={form.max_tokens} /></label><label>超时（秒）<input type="number" min="5" max="300" bind:value={form.timeout_seconds} /></label></div></section>
@@ -201,4 +250,5 @@
 <style>
   .settings { flex: 1; min-width: 0; overflow-y: auto; padding: 26px max(18px, 6vw) 48px; }.settings > header, form, .tabs, .local-execution, .settings :global(.governance) { max-width: 860px; }.settings > header { display: flex; justify-content: space-between; margin-bottom: 20px; }.settings > header p { color: var(--color-primary); font-size: 10px; font-weight: 700; letter-spacing: 1px; }h2 { margin-top: 3px; font-size: 22px; }.tabs { display:flex; gap:6px; margin-bottom:8px; border-bottom:1px solid var(--color-border); }.tabs button { margin-bottom:-1px; border-color:transparent; border-radius:0; background:transparent; color:var(--color-text-muted); }.tabs button.active { border-bottom-color:var(--color-primary); color:var(--color-primary); }section section, .local-execution { padding: 18px 0; border-top: 1px solid var(--color-border); }h3 { font-size: 14px; }.section-title { display: flex; align-items: center; justify-content: space-between; }.two,.three { display: grid; gap: 12px; }.two { grid-template-columns: repeat(2,minmax(0,1fr)); }.three { grid-template-columns: repeat(3,minmax(0,1fr)); }label { display: grid; gap: 6px; margin-top: 12px; color: var(--color-text-muted); font-size: 12px; font-weight: 600; }input,textarea,select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; font-size: 13px; outline: none; resize: vertical; }input:focus,textarea:focus,select:focus { border-color: var(--color-primary); }button { min-height: 34px; padding: 0 12px; border: 1px solid var(--color-primary); border-radius: 4px; background: var(--color-primary); color: #fff; cursor: pointer; font-size: 12px; font-weight: 700; }.close { display:grid; width:34px; place-items:center; padding:0; border-color:var(--color-border); background:transparent; color:var(--color-text-muted); font-size:22px; }.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.tool-list { margin-top: 10px; border:1px solid var(--color-border); border-radius:5px; }.tool-row { display:flex; align-items:center; gap:10px; margin:0; padding:10px; }.tool-row + .tool-row { border-top:1px solid var(--color-border); }.tool-row input { width:16px; }.tool-row span { min-width:0; }.tool-row strong,.tool-row small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.tool-row strong { color:var(--color-text); }.tool-row small,.muted { margin-top:3px; color:var(--color-text-muted); font-size:11px; }.tool-create { margin-top:16px; padding-top:4px; border-top:1px dashed var(--color-border); }.tool-create > button { margin-top:10px; }.local-execution > button { margin-top:16px; }.local-actions { display:flex; gap:8px; margin-top:16px; }.local-actions button { margin:0; }footer { display:flex; justify-content:flex-end; gap:8px; padding-top:18px; }.error { margin-top:12px; color:var(--color-error); font-size:12px; }button:disabled { opacity:.55; cursor:default; }
   @media(max-width:650px){.settings{padding:20px 14px 36px}.two,.three{grid-template-columns:1fr}}
+  .qq-execution { padding: 18px 0; border-top: 1px solid var(--color-border); }.qq-execution .section-title { align-items: flex-start; }.qq-status { padding: 4px 8px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-muted); font-size: 11px; font-weight: 700; }.qq-status.connected { border-color: var(--color-online); color: var(--color-online); }.qq-status.error-status { border-color: var(--color-error); color: var(--color-error); }
 </style>

@@ -227,6 +227,18 @@ export const api = {
     return request('GET', `/agents/${agentId}`);
   },
 
+  getAgentQqConnection(agentId) {
+    return request('GET', `/agents/${agentId}/qq`);
+  },
+
+  connectAgentQq(agentId, payload) {
+    return request('POST', `/agents/${agentId}/qq`, payload, { timeout: 30000 });
+  },
+
+  disconnectAgentQq(agentId) {
+    return request('DELETE', `/agents/${agentId}/qq`);
+  },
+
   createAgent(payload) {
     return request('POST', '/agents', payload, { timeout: 30000 });
   },

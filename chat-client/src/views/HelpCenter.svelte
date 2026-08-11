@@ -1,8 +1,5 @@
 <script>
   import { createEventDispatcher } from 'svelte';
-  import { onMount } from 'svelte';
-  import { Copy, ExternalLink, Save, Trash2 } from 'lucide-svelte';
-  import { auth } from '../lib/store.js';
 
   const dispatch = createEventDispatcher();
   const sections = [
@@ -23,71 +20,6 @@
     ['run list | run events ID | run attach ID', '查看运行、读取事件，或持续输出指定运行的文本并等待终态。'],
   ];
 
-  let qqMessageLink = '';
-  let qqLinkError = '';
-  let qqLinkStatus = '';
-  let qqLinkStorageKey = '';
-
-  onMount(() => {
-    qqLinkStorageKey = `qq_message_direct_link:${$auth?.id || 'anonymous'}`;
-    try {
-      qqMessageLink = localStorage.getItem(qqLinkStorageKey) || '';
-    } catch {
-      qqLinkError = '浏览器存储不可用，请检查隐私设置';
-    }
-  });
-
-  function validateQqMessageLink(value) {
-    const normalized = value.trim();
-    if (!normalized) return '请输入 QQ Bot 消息直链';
-    if (normalized.length > 2048) return '链接不能超过 2048 个字符';
-    try {
-      const url = new URL(normalized);
-      if (!['http:', 'https:'].includes(url.protocol)) return '链接必须使用 HTTP 或 HTTPS';
-    } catch {
-      return '请输入有效的 HTTP 或 HTTPS 链接';
-    }
-    return '';
-  }
-
-  function saveQqMessageLink() {
-    qqLinkError = validateQqMessageLink(qqMessageLink);
-    qqLinkStatus = '';
-    if (qqLinkError) return;
-    qqMessageLink = qqMessageLink.trim();
-    try {
-      localStorage.setItem(qqLinkStorageKey, qqMessageLink);
-      qqLinkStatus = '已保存到当前浏览器';
-    } catch {
-      qqLinkError = '保存失败，请检查浏览器存储权限';
-    }
-  }
-
-  function clearQqMessageLink() {
-    qqMessageLink = '';
-    qqLinkError = '';
-    qqLinkStatus = '';
-    try { localStorage.removeItem(qqLinkStorageKey); } catch { qqLinkError = '清除失败，请检查浏览器存储权限'; }
-  }
-
-  async function copyQqMessageLink() {
-    qqLinkError = validateQqMessageLink(qqMessageLink);
-    qqLinkStatus = '';
-    if (qqLinkError) return;
-    try {
-      await navigator.clipboard.writeText(qqMessageLink.trim());
-      qqLinkStatus = '已复制链接';
-    } catch {
-      qqLinkError = '复制失败，请手动选择并复制链接';
-    }
-  }
-
-  function openQqMessageLink() {
-    qqLinkError = validateQqMessageLink(qqMessageLink);
-    qqLinkStatus = '';
-    if (qqLinkError) return;
-    window.open(qqMessageLink.trim(), '_blank', 'noopener,noreferrer');
-  }
 </script>
 
 <section class="help" aria-label="帮助中心">
@@ -135,26 +67,11 @@
         <p>QQ Bot 网关将 QQ 的群聊 @ 消息和私聊消息转成当前 Agent 的独立运行，再将最终回复回传 QQ。Gateway 只处理 QQ 平台连接、事件去重、会话映射和消息发送；Agent、Conversation、Run、工具和模型调用仍由 Agent 服务负责。</p>
         <div class="callout"><strong>先准备目标 Agent</strong><span>先在本应用创建一个可正常运行的 Agent，记录它的 Agent ID 和所属账号的用户 ID。网关会把每个 QQ 群或私聊范围映射到该 Agent 的独立会话。</span></div>
 
-        <div class="qq-link-panel">
-          <div><h4>QQ Bot 消息直链</h4><p>直接粘贴 QQ Bot 的消息直链。链接只保存在当前登录账号的浏览器中，前端可以直接复制或打开，不需要修改 `.env`。</p></div>
-          <label for="qq-message-link">消息直链<input id="qq-message-link" type="url" maxlength="2048" bind:value={qqMessageLink} placeholder="https://..." autocomplete="url" on:input={() => { qqLinkError = ''; qqLinkStatus = ''; }} /></label>
-          {#if qqLinkError}<p class="qq-link-feedback error" role="alert">{qqLinkError}</p>{:else if qqLinkStatus}<p class="qq-link-feedback success" role="status">{qqLinkStatus}</p>{/if}
-          <div class="qq-link-actions">
-            <button type="button" on:click={saveQqMessageLink}><Save size={14} />保存</button>
-            <button type="button" class="secondary" on:click={copyQqMessageLink} disabled={!qqMessageLink.trim()}><Copy size={14} />复制</button>
-            <button type="button" class="secondary" on:click={openQqMessageLink} disabled={!qqMessageLink.trim()}><ExternalLink size={14} />打开</button>
-            <button type="button" class="danger" on:click={clearQqMessageLink} disabled={!qqMessageLink.trim()}><Trash2 size={14} />清除</button>
-          </div>
-        </div>
-
         <h4>配置服务端</h4>
-        <ol><li>在 QQ 开放平台创建机器人应用，取得 App ID、Client Secret 和 Bot ID，并确认当前官方文档要求的 Webhook 签名方式与事件订阅权限。</li><li>在部署机器的 <code>chat-server/.agent.env</code> 填写 QQ 配置。<code>AGENT_SERVICE_SECRET</code> 必须与 Agent 服务使用同一值；不要把该文件、AppSecret 或加密主密钥提交到仓库。</li><li>将 <code>QQ_GATEWAY_ENABLED</code> 设为 <code>true</code>。根目录启动脚本会在聊天服务和 Agent API 健康后启动 Gateway。</li></ol>
+        <div class="callout"><strong>推荐：网页一键连接</strong><span>AppID、AppSecret、Bot ID 和目标 Agent 不需要写入 `.env`。打开目标 Agent 的“配置”，在 QQ Bot 连接区域填写 AppID/AppSecret 后点击“一键连接 QQ Bot”；AppSecret 由 Gateway 加密保存。</span></div>
+        <ol><li>在 QQ 开放平台创建机器人应用，取得 AppID 和 AppSecret，并确认当前官方文档要求的事件订阅权限。</li><li>在部署机器的 <code>chat-server/.agent.env</code> 只配置服务端密钥；不要把 AppSecret 写入文件。</li><li>将 <code>QQ_GATEWAY_ENABLED</code> 设为 <code>true</code> 启动 Gateway，然后在目标 Agent 的“配置 → QQ Bot 连接”中填写 AppID/AppSecret。</li></ol>
         <pre><code>QQ_GATEWAY_ENABLED=true
-QQ_APP_ID=your-qq-app-id
-QQ_CLIENT_SECRET=your-qq-client-secret
-QQ_BOT_ID=your-qq-bot-id
-QQ_DEFAULT_AGENT_ID=your-agent-id
-QQ_DEFAULT_OWNER_USER_ID=your-owner-user-id
+## AppID/AppSecret 在网页 Agent 设置中填写，不放入环境文件
 QQ_GATEWAY_MASTER_KEY=your-fernet-key
 QQ_WEBHOOK_SIGNATURE_MODE=ed25519</code></pre>
         <p>使用以下命令生成 <code>QQ_GATEWAY_MASTER_KEY</code>，并将生成值仅保存到部署环境：<code>python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'</code>。</p>
