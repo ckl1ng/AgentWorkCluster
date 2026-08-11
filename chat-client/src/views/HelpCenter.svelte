@@ -1,5 +1,8 @@
 <script>
   import { createEventDispatcher } from 'svelte';
+  import { onMount } from 'svelte';
+  import { Copy, ExternalLink, Save, Trash2 } from 'lucide-svelte';
+  import { auth } from '../lib/store.js';
 
   const dispatch = createEventDispatcher();
   const sections = [
@@ -19,6 +22,72 @@
     ['run PROMPT --workspace ID --agent ID', '创建本机文本运行；工作区 ID 使用 workspace list 返回的本地 ID。'],
     ['run list | run events ID | run attach ID', '查看运行、读取事件，或持续输出指定运行的文本并等待终态。'],
   ];
+
+  let qqMessageLink = '';
+  let qqLinkError = '';
+  let qqLinkStatus = '';
+  let qqLinkStorageKey = '';
+
+  onMount(() => {
+    qqLinkStorageKey = `qq_message_direct_link:${$auth?.id || 'anonymous'}`;
+    try {
+      qqMessageLink = localStorage.getItem(qqLinkStorageKey) || '';
+    } catch {
+      qqLinkError = '浏览器存储不可用，请检查隐私设置';
+    }
+  });
+
+  function validateQqMessageLink(value) {
+    const normalized = value.trim();
+    if (!normalized) return '请输入 QQ Bot 消息直链';
+    if (normalized.length > 2048) return '链接不能超过 2048 个字符';
+    try {
+      const url = new URL(normalized);
+      if (!['http:', 'https:'].includes(url.protocol)) return '链接必须使用 HTTP 或 HTTPS';
+    } catch {
+      return '请输入有效的 HTTP 或 HTTPS 链接';
+    }
+    return '';
+  }
+
+  function saveQqMessageLink() {
+    qqLinkError = validateQqMessageLink(qqMessageLink);
+    qqLinkStatus = '';
+    if (qqLinkError) return;
+    qqMessageLink = qqMessageLink.trim();
+    try {
+      localStorage.setItem(qqLinkStorageKey, qqMessageLink);
+      qqLinkStatus = '已保存到当前浏览器';
+    } catch {
+      qqLinkError = '保存失败，请检查浏览器存储权限';
+    }
+  }
+
+  function clearQqMessageLink() {
+    qqMessageLink = '';
+    qqLinkError = '';
+    qqLinkStatus = '';
+    try { localStorage.removeItem(qqLinkStorageKey); } catch { qqLinkError = '清除失败，请检查浏览器存储权限'; }
+  }
+
+  async function copyQqMessageLink() {
+    qqLinkError = validateQqMessageLink(qqMessageLink);
+    qqLinkStatus = '';
+    if (qqLinkError) return;
+    try {
+      await navigator.clipboard.writeText(qqMessageLink.trim());
+      qqLinkStatus = '已复制链接';
+    } catch {
+      qqLinkError = '复制失败，请手动选择并复制链接';
+    }
+  }
+
+  function openQqMessageLink() {
+    qqLinkError = validateQqMessageLink(qqMessageLink);
+    qqLinkStatus = '';
+    if (qqLinkError) return;
+    window.open(qqMessageLink.trim(), '_blank', 'noopener,noreferrer');
+  }
 </script>
 
 <section class="help" aria-label="帮助中心">
@@ -65,6 +134,18 @@
         <p class="eyebrow">QQ BOT GATEWAY</p><h3>接入 QQ Bot</h3>
         <p>QQ Bot 网关将 QQ 的群聊 @ 消息和私聊消息转成当前 Agent 的独立运行，再将最终回复回传 QQ。Gateway 只处理 QQ 平台连接、事件去重、会话映射和消息发送；Agent、Conversation、Run、工具和模型调用仍由 Agent 服务负责。</p>
         <div class="callout"><strong>先准备目标 Agent</strong><span>先在本应用创建一个可正常运行的 Agent，记录它的 Agent ID 和所属账号的用户 ID。网关会把每个 QQ 群或私聊范围映射到该 Agent 的独立会话。</span></div>
+
+        <div class="qq-link-panel">
+          <div><h4>QQ Bot 消息直链</h4><p>直接粘贴 QQ Bot 的消息直链。链接只保存在当前登录账号的浏览器中，前端可以直接复制或打开，不需要修改 `.env`。</p></div>
+          <label for="qq-message-link">消息直链<input id="qq-message-link" type="url" maxlength="2048" bind:value={qqMessageLink} placeholder="https://..." autocomplete="url" on:input={() => { qqLinkError = ''; qqLinkStatus = ''; }} /></label>
+          {#if qqLinkError}<p class="qq-link-feedback error" role="alert">{qqLinkError}</p>{:else if qqLinkStatus}<p class="qq-link-feedback success" role="status">{qqLinkStatus}</p>{/if}
+          <div class="qq-link-actions">
+            <button type="button" on:click={saveQqMessageLink}><Save size={14} />保存</button>
+            <button type="button" class="secondary" on:click={copyQqMessageLink} disabled={!qqMessageLink.trim()}><Copy size={14} />复制</button>
+            <button type="button" class="secondary" on:click={openQqMessageLink} disabled={!qqMessageLink.trim()}><ExternalLink size={14} />打开</button>
+            <button type="button" class="danger" on:click={clearQqMessageLink} disabled={!qqMessageLink.trim()}><Trash2 size={14} />清除</button>
+          </div>
+        </div>
 
         <h4>配置服务端</h4>
         <ol><li>在 QQ 开放平台创建机器人应用，取得 App ID、Client Secret 和 Bot ID，并确认当前官方文档要求的 Webhook 签名方式与事件订阅权限。</li><li>在部署机器的 <code>chat-server/.agent.env</code> 填写 QQ 配置。<code>AGENT_SERVICE_SECRET</code> 必须与 Agent 服务使用同一值；不要把该文件、AppSecret 或加密主密钥提交到仓库。</li><li>将 <code>QQ_GATEWAY_ENABLED</code> 设为 <code>true</code>。根目录启动脚本会在聊天服务和 Agent API 健康后启动 Gateway。</li></ol>
@@ -191,5 +272,5 @@ node bin/local-agent.js run attach run_xxx</code></pre>
 </section>
 
 <style>
-  .help { flex:1; min-width:0; overflow:auto; padding:28px max(20px,6vw) 52px; }.help > header,.layout { max-width:1120px; }.help > header { display:flex; justify-content:space-between; gap:20px; margin-bottom:22px; }.help header p,.eyebrow { margin:0; color:var(--color-primary); font-size:10px; font-weight:700; letter-spacing:1px; }.help h2 { margin:4px 0; font-size:24px; }.help header span { color:var(--color-text-muted); font-size:13px; }.close { display:grid; width:36px; height:36px; place-items:center; flex:0 0 auto; padding:0; border:1px solid var(--color-border); border-radius:4px; background:transparent; color:var(--color-text-muted); cursor:pointer; font-size:24px; }.layout { display:grid; grid-template-columns:190px minmax(0,1fr); align-items:start; gap:34px; }.layout nav { position:sticky; top:0; display:grid; gap:2px; padding:8px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-surface); }.layout nav a { padding:8px; border-radius:3px; color:var(--color-text-muted); font-size:12px; text-decoration:none; }.layout nav a:hover { background:var(--color-hover); color:var(--color-primary); }article { min-width:0; }article section { scroll-margin-top:20px; padding:0 0 26px; margin-bottom:24px; border-bottom:1px solid var(--color-border); }article h3 { margin:5px 0 10px; font-size:18px; }article h4 { margin:18px 0 7px; font-size:14px; }article p,article li,article dd,table { color:var(--color-text-muted); font-size:14px; line-height:1.7; }article ol,article ul { margin:10px 0 0 22px; }article li + li { margin-top:5px; }article strong { color:var(--color-text); }code { overflow-wrap:anywhere; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9em; }.callout { display:grid; gap:4px; margin-top:15px; padding:11px 13px; border-left:3px solid var(--color-primary); background:var(--color-active); color:var(--color-text-muted); font-size:13px; line-height:1.6; }.callout.warning { border-left-color:var(--color-error); }.callout strong { font-size:13px; }.callout span { color:var(--color-text-muted); }.help pre { overflow:auto; margin:11px 0 0; padding:12px 14px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-input); color:var(--color-text); font-size:12px; line-height:1.65; }.help pre code { white-space:pre; overflow-wrap:normal; }.table-wrap { overflow-x:auto; margin-top:12px; border:1px solid var(--color-border); border-radius:5px; }.table-wrap table { width:100%; min-width:620px; border-collapse:collapse; text-align:left; }.table-wrap th,.table-wrap td { padding:9px 11px; border-bottom:1px solid var(--color-border); vertical-align:top; }.table-wrap th { color:var(--color-text); font-size:12px; }.table-wrap tr:last-child td { border-bottom:0; }.table-wrap td:first-child { width:38%; color:var(--color-text); }.help dl { margin:10px 0 0; }.help dt { margin-top:13px; color:var(--color-text); font-size:13px; font-weight:700; }.help dd { margin:4px 0 0; }@media(max-width:760px){.help{padding:22px 16px 40px}.layout{grid-template-columns:1fr;gap:18px}.layout nav{position:static;display:flex;overflow:auto;white-space:nowrap}.layout nav a{flex:0 0 auto}.help h2{font-size:21px}.help pre{font-size:11px}}
+  .help { flex:1; min-width:0; overflow:auto; padding:28px max(20px,6vw) 52px; }.help > header,.layout { max-width:1120px; }.help > header { display:flex; justify-content:space-between; gap:20px; margin-bottom:22px; }.help header p,.eyebrow { margin:0; color:var(--color-primary); font-size:10px; font-weight:700; letter-spacing:1px; }.help h2 { margin:4px 0; font-size:24px; }.help header span { color:var(--color-text-muted); font-size:13px; }.close { display:grid; width:36px; height:36px; place-items:center; flex:0 0 auto; padding:0; border:1px solid var(--color-border); border-radius:4px; background:transparent; color:var(--color-text-muted); cursor:pointer; font-size:24px; }.layout { display:grid; grid-template-columns:190px minmax(0,1fr); align-items:start; gap:34px; }.layout nav { position:sticky; top:0; display:grid; gap:2px; padding:8px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-surface); }.layout nav a { padding:8px; border-radius:3px; color:var(--color-text-muted); font-size:12px; text-decoration:none; }.layout nav a:hover { background:var(--color-hover); color:var(--color-primary); }article { min-width:0; }article section { scroll-margin-top:20px; padding:0 0 26px; margin-bottom:24px; border-bottom:1px solid var(--color-border); }article h3 { margin:5px 0 10px; font-size:18px; }article h4 { margin:18px 0 7px; font-size:14px; }article p,article li,article dd,table { color:var(--color-text-muted); font-size:14px; line-height:1.7; }article ol,article ul { margin:10px 0 0 22px; }article li + li { margin-top:5px; }article strong { color:var(--color-text); }code { overflow-wrap:anywhere; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9em; }.callout { display:grid; gap:4px; margin-top:15px; padding:11px 13px; border-left:3px solid var(--color-primary); background:var(--color-active); color:var(--color-text-muted); font-size:13px; line-height:1.6; }.callout.warning { border-left-color:var(--color-error); }.callout strong { font-size:13px; }.callout span { color:var(--color-text-muted); }.qq-link-panel { display:grid; gap:10px; margin-top:15px; padding:15px; border:1px solid var(--color-border); border-radius:6px; background:var(--color-surface); }.qq-link-panel h4 { margin:0 0 3px; }.qq-link-panel p { margin:0; font-size:13px; }.qq-link-panel label { display:grid; gap:6px; color:var(--color-text-muted); font-size:12px; font-weight:600; }.qq-link-panel input { width:100%; min-width:0; padding:9px 10px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-input); color:var(--color-text); font:inherit; font-size:13px; outline:none; }.qq-link-panel input:focus { border-color:var(--color-primary); }.qq-link-actions { display:flex; flex-wrap:wrap; gap:8px; }.qq-link-actions button { display:inline-flex; align-items:center; gap:6px; min-height:34px; padding:0 11px; border:1px solid var(--color-primary); border-radius:4px; background:var(--color-primary); color:#fff; cursor:pointer; font-size:12px; font-weight:700; }.qq-link-actions button.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.qq-link-actions button.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.qq-link-actions button:disabled { opacity:.5; cursor:default; }.qq-link-feedback.error { color:var(--color-error); }.qq-link-feedback.success { color:var(--color-online); }.help pre { overflow:auto; margin:11px 0 0; padding:12px 14px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-input); color:var(--color-text); font-size:12px; line-height:1.65; }.help pre code { white-space:pre; overflow-wrap:normal; }.table-wrap { overflow-x:auto; margin-top:12px; border:1px solid var(--color-border); border-radius:5px; }.table-wrap table { width:100%; min-width:620px; border-collapse:collapse; text-align:left; }.table-wrap th,.table-wrap td { padding:9px 11px; border-bottom:1px solid var(--color-border); vertical-align:top; }.table-wrap th { color:var(--color-text); font-size:12px; }.table-wrap tr:last-child td { border-bottom:0; }.table-wrap td:first-child { width:38%; color:var(--color-text); }.help dl { margin:10px 0 0; }.help dt { margin-top:13px; color:var(--color-text); font-size:13px; font-weight:700; }.help dd { margin:4px 0 0; }@media(max-width:760px){.help{padding:22px 16px 40px}.layout{grid-template-columns:1fr;gap:18px}.layout nav{position:static;display:flex;overflow:auto;white-space:nowrap}.layout nav a{flex:0 0 auto}.help h2{font-size:21px}.help pre{font-size:11px}.qq-link-actions button{flex:1 1 auto}}
 </style>
