@@ -13,7 +13,6 @@ dist/
 target/
 __pycache__/
 *.py[cod]
-/chat-server/chat-server
 
 # Local databases and editor files
 *.db
