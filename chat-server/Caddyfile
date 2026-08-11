@@ -1,0 +1,22 @@
+:9010 {
+  @agent_api path /api/v1/agents* /api/v1/agent-conversations* /api/v1/agent-runs* /api/v1/tools* /api/v1/evaluations* /api/v1/local-agent* /api/v1/tasks* /api/v1/task-dispatch-events* /api/v1/notifications*
+  handle @agent_api {
+    reverse_proxy agent-api:9011
+  }
+
+  handle /agent/ws* {
+    reverse_proxy agent-api:9011
+  }
+
+  handle /task/ws* {
+    reverse_proxy agent-api:9011
+  }
+
+  handle /local-agent/ws* {
+    reverse_proxy agent-api:9011
+  }
+
+  handle {
+    reverse_proxy chat-server:9010
+  }
+}

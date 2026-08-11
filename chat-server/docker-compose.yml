@@ -1,0 +1,109 @@
+version: "3.8"
+
+services:
+  chat-server:
+    build: .
+    container_name: chat-server
+    environment:
+      - HOST=0.0.0.0
+      - PORT=9010
+      - DATA_DIR=/data
+      - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
+    volumes:
+      - chat-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9010/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  agent-api:
+    build: ../agent-service
+    container_name: chat-agent-api
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=agent
+      - PGUSER=agent
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your environment}
+      - CHAT_AUTH_INTROSPECTION_URL=http://chat-server:9010/internal/v1/auth/introspect
+      - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
+      - AGENT_MASTER_KEY=${AGENT_MASTER_KEY:?set AGENT_MASTER_KEY in your environment}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      chat-server:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9011/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  agent-worker:
+    build: ../agent-service
+    container_name: chat-agent-worker
+    command: ["python", "-m", "app.worker"]
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=agent
+      - PGUSER=agent
+      - PGPASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your environment}
+      - CHAT_AUTH_INTROSPECTION_URL=http://chat-server:9010/internal/v1/auth/introspect
+      - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
+      - AGENT_MASTER_KEY=${AGENT_MASTER_KEY:?set AGENT_MASTER_KEY in your environment}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+      agent-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: chat-agent-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: chat-agent-postgres
+    environment:
+      - POSTGRES_DB=agent
+      - POSTGRES_USER=agent
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your environment}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  gateway:
+    image: caddy:2.8-alpine
+    container_name: chat-gateway
+    ports:
+      - "9010:9010"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - chat-server
+      - agent-api
+    restart: unless-stopped
+
+volumes:
+  chat-data:
+  redis-data:
+  postgres-data:

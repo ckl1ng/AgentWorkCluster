@@ -1,0 +1,20 @@
+[Unit]
+Description=Chat Agent database migrations
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=chat-server
+Group=chat-server
+WorkingDirectory=/opt/agentWorkCluster/agent-service
+EnvironmentFile=/etc/chat-server/agent.env
+ExecStart=/opt/agentWorkCluster/.venv/bin/python -m alembic upgrade head
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chat-server
+
+[Install]
+WantedBy=multi-user.target

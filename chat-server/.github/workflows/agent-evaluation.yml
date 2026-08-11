@@ -1,0 +1,25 @@
+name: Agent evaluation baseline
+
+on:
+  push:
+    paths:
+      - 'agent-service/**'
+      - '.github/workflows/agent-evaluation.yml'
+  pull_request:
+    paths:
+      - 'agent-service/**'
+      - '.github/workflows/agent-evaluation.yml'
+
+jobs:
+  agent-evaluation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p 'test_*.py' -v

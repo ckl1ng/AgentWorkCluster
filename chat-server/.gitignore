@@ -1,0 +1,7 @@
+/target
+/.agent.env
+/.runtime/
+/data
+__pycache__/
+*.py[cod]
+local-agent/node_modules/

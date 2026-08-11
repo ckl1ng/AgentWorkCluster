@@ -1,0 +1,26 @@
+[Unit]
+Description=Chat Agent API
+After=network-online.target chat-server.service agent-migrate.service
+Requires=chat-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chat-server
+Group=chat-server
+WorkingDirectory=/opt/agentWorkCluster/agent-service
+EnvironmentFile=/etc/chat-server/agent.env
+Environment=AGENT_API_HOST=127.0.0.1
+Environment=AGENT_API_PORT=9011
+ExecStartPre=/opt/agentWorkCluster/.venv/bin/python -m alembic upgrade head
+ExecStart=/opt/agentWorkCluster/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9011
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chat-server
+
+[Install]
+WantedBy=multi-user.target

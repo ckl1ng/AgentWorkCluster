@@ -1,0 +1,25 @@
+[Unit]
+Description=Chat Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chat-server
+Group=chat-server
+WorkingDirectory=/opt/agentWorkCluster/chat-server
+EnvironmentFile=/etc/chat-server/agent.env
+Environment=DATA_DIR=/var/lib/chat-server/data
+Environment=HOST=127.0.0.1
+Environment=PORT=9012
+ExecStart=/opt/agentWorkCluster/chat-server/chat-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chat-server
+
+[Install]
+WantedBy=multi-user.target

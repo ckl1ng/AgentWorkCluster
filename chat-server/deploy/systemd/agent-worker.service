@@ -1,0 +1,24 @@
+[Unit]
+Description=Chat Agent Redis Streams Worker
+After=network-online.target agent-api.service agent-migrate.service
+Requires=agent-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chat-server
+Group=chat-server
+WorkingDirectory=/opt/agentWorkCluster/agent-service
+EnvironmentFile=/etc/chat-server/agent.env
+ExecStartPre=/bin/sh -c 'test -n "$$REDIS_URL"'
+ExecStart=/opt/agentWorkCluster/.venv/bin/python -m app.worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chat-server
+
+[Install]
+WantedBy=multi-user.target
