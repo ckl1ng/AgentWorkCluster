@@ -51,7 +51,7 @@
   }
 
   async function saveToolAssignments() {
-    if (!toolAssignmentsDirty || savingTools) return;
+    if (savingTools) return;
     savingTools = true;
     error = '';
     try {
@@ -213,7 +213,7 @@
     </div>{/if}
     <div class="tool-save">
       <span class:dirty={toolAssignmentsDirty}>{toolAssignmentsDirty ? '有未保存的工具授权' : '工具授权已保存'}</span>
-      <button type="button" on:click={saveToolAssignments} disabled={!toolAssignmentsDirty || savingTools}>{savingTools ? '正在保存...' : '保存工具授权'}</button>
+      <button type="button" on:click={saveToolAssignments} disabled={savingTools}>{savingTools ? '正在保存...' : '保存工具授权'}</button>
     </div>
   </section>
 
