@@ -525,7 +525,9 @@
   }
   @media (max-width: 768px) {
     .main { padding: 12px; }
-    .workspace { gap: 12px; }
+    .workspace { position:relative; gap:12px; }
+    .stage-shell { min-height:0; padding-bottom:76px; }
+    .workspace :global(.tasks) { position:absolute; right:0; bottom:0; left:0; z-index:10; }
     .stage-surface { border-radius: 20px; }
     .home { padding: 24px 14px; }
     .hero-copy { padding: 22px 20px; }

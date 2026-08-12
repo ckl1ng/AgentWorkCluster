@@ -9,6 +9,8 @@
   let tools = [];
   let memories = [];
   let assigned = new Set(agent.tool_ids || []);
+  let savedAssigned = new Set(agent.tool_ids || []);
+  let savingTools = false;
   let savingMemory = false;
   let tool = { name: '', description: '', kind: 'http', method: 'GET', url: '', command: '', args: '', headers: '{}', schema: '{"type":"object","properties":{}}', sideEffect: 'read', confirmationMode: 'none', rateLimit: 6, parameterLocations: '{}' };
   let openApi = { documentUrl: '', document: '', baseUrl: '' };
@@ -27,19 +29,35 @@
       ]);
       tools = available;
       assigned = new Set(current.map(item => item.id));
+      savedAssigned = new Set(assigned);
       memories = storedMemories;
     } catch (e) { error = e.message || '无法加载治理配置'; }
     finally { loading = false; }
   }
 
-  async function toggleTool(id) {
+  function hasUnsavedToolAssignments() {
+    return assigned.size !== savedAssigned.size || [...assigned].some(id => !savedAssigned.has(id));
+  }
+
+  function toggleTool(id) {
     const next = new Set(assigned);
     if (next.has(id)) next.delete(id); else next.add(id);
+    assigned = next;
+    error = '';
+    dispatch('dirty', { tools: hasUnsavedToolAssignments() });
+  }
+
+  async function saveToolAssignments() {
+    if (!hasUnsavedToolAssignments() || savingTools) return;
+    savingTools = true;
+    error = '';
     try {
-      const updated = await api.assignAgentTools(agent.id, [...next]);
-      assigned = next;
-      dispatch('saved', { agent: { ...agent, ...updated, tool_ids: [...next] } });
+      const updated = await api.assignAgentTools(agent.id, [...assigned]);
+      savedAssigned = new Set(assigned);
+      dispatch('dirty', { tools: false });
+      dispatch('updated', { agent: { ...agent, ...updated, tool_ids: [...assigned] } });
     } catch (e) { error = e.message || '无法更新工具分配'; }
+    finally { savingTools = false; }
   }
 
   function normalizePolicy(value = tool) {
@@ -106,7 +124,10 @@
     try {
       const created = await api.createTool(buildToolPayload(value));
       tools = [created, ...tools];
-      if (!assigned.has(created.id)) await toggleTool(created.id);
+      if (!assigned.has(created.id)) {
+        assigned = new Set([...assigned, created.id]);
+        dispatch('dirty', { tools: true });
+      }
       tool = { name: '', description: '', kind: 'http', method: 'GET', url: '', headers: '{}', schema: '{"type":"object","properties":{}}', sideEffect: 'read', confirmationMode: 'none', rateLimit: 6, parameterLocations: '{}' };
     } catch (e) { error = e.message || '无法创建工具'; }
   }
@@ -154,7 +175,7 @@
     try {
       const updated = await api.updateAgent(agent.id, { memory_enabled: !agent.memory_enabled });
       agent = { ...agent, ...updated };
-      dispatch('saved', { agent });
+      dispatch('updated', { agent });
     } catch (e) { error = e.message || '无法更新记忆授权'; }
     finally { savingMemory = false; }
   }
@@ -185,6 +206,10 @@
         </label>
       {:else}<p class="muted">尚未创建工具</p>{/each}
     </div>{/if}
+    <div class="tool-save">
+      <span class:dirty={hasUnsavedToolAssignments()}>{hasUnsavedToolAssignments() ? '有未保存的工具授权' : '工具授权已保存'}</span>
+      <button type="button" on:click={saveToolAssignments} disabled={!hasUnsavedToolAssignments() || savingTools}>{savingTools ? '正在保存...' : '保存工具授权'}</button>
+    </div>
   </section>
 
   <section>
@@ -195,7 +220,7 @@
     {#if tool.kind === 'mcp' || tool.kind === 'mcp_stdio'}<label>远程工具名<input bind:value={tool.remoteToolName} /></label>{/if}
     <div class="grid three"><label>确认策略<select bind:value={tool.confirmationMode} disabled={tool.sideEffect === 'destructive'}><option value="none">无需确认</option><option value="per_run">每运行确认</option><option value="per_call">每次确认</option></select></label><label>每运行限额<input type="number" min="1" max="100" bind:value={tool.rateLimit} /></label><label>参数位置 JSON<textarea rows="2" bind:value={tool.parameterLocations}></textarea></label></div>
     <div class="grid"><label>Headers JSON<textarea rows="3" bind:value={tool.headers}></textarea></label><label>输入 Schema JSON<textarea rows="3" bind:value={tool.schema}></textarea></label></div>
-    <button type="button" on:click={() => createTool()} disabled={!tool.name.trim() || ((tool.kind === 'local' || tool.kind === 'mcp_stdio') ? !tool.command.trim() : !tool.url.trim())}>创建并分配</button>
+    <button type="button" on:click={() => createTool()} disabled={!tool.name.trim() || ((tool.kind === 'local' || tool.kind === 'mcp_stdio') ? !tool.command.trim() : !tool.url.trim())}>创建并加入授权草稿</button>
   </section>
 
   <section>
@@ -215,5 +240,5 @@
 </section>
 
 <style>
-  .governance section { padding:20px 0; border-top:1px solid var(--color-border); }.heading { display:flex; justify-content:space-between; gap:16px; align-items:start; } h3 { margin:0; font-size:14px; } p { margin:5px 0 0; color:var(--color-text-muted); font-size:12px; }.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:12px; }.grid.three { grid-template-columns:repeat(3,minmax(0,1fr)); } label { display:grid; gap:6px; color:var(--color-text-muted); font-size:12px; font-weight:600; } input,select,textarea { width:100%; min-width:0; padding:9px 10px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-input); color:var(--color-text); font:inherit; font-size:13px; outline:none; resize:vertical; } input:focus,select:focus,textarea:focus { border-color:var(--color-primary); } button { min-height:34px; margin-top:12px; padding:0 12px; border:1px solid var(--color-primary); border-radius:4px; background:var(--color-primary); color:#fff; cursor:pointer; font-size:12px; font-weight:700; } button.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.heading button { margin:0; }.heading button.enabled { border-color:var(--color-online); color:var(--color-online); background:transparent; }.tool-list,.memory-list,.candidates { margin-top:12px; border:1px solid var(--color-border); border-radius:5px; }.tool-row,.memory-list article,.candidates article { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px; }.tool-row + .tool-row,.memory-list article + article,.candidates article + article { border-top:1px solid var(--color-border); }.tool-row { justify-content:start; }.tool-row input { width:16px; }.tool-row strong,.tool-row small,.memory-list strong,.memory-list small,.candidates small { display:block; }.tool-row small,.memory-list small,.candidates small,.muted { color:var(--color-text-muted); font-size:11px; }.memory-list article.conflict { border-left:3px solid var(--color-error); }.memory-list article p,.candidates article p { overflow-wrap:anywhere; }.memory-list button,.candidates button { flex:0 0 auto; margin:0; }.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.error { color:var(--color-error); } button:disabled { opacity:.55; cursor:default; } @media(max-width:650px){.grid,.grid.three{grid-template-columns:1fr}.heading{align-items:center}.candidates article{align-items:start}}
+  .governance section { padding:20px 0; border-top:1px solid var(--color-border); }.heading { display:flex; justify-content:space-between; gap:16px; align-items:start; } h3 { margin:0; font-size:14px; } p { margin:5px 0 0; color:var(--color-text-muted); font-size:12px; }.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-top:12px; }.grid.three { grid-template-columns:repeat(3,minmax(0,1fr)); } label { display:grid; gap:6px; color:var(--color-text-muted); font-size:12px; font-weight:600; } input,select,textarea { width:100%; min-width:0; padding:9px 10px; border:1px solid var(--color-border); border-radius:5px; background:var(--color-input); color:var(--color-text); font:inherit; font-size:13px; outline:none; resize:vertical; } input:focus,select:focus,textarea:focus { border-color:var(--color-primary); } button { min-height:34px; margin-top:12px; padding:0 12px; border:1px solid var(--color-primary); border-radius:4px; background:var(--color-primary); color:#fff; cursor:pointer; font-size:12px; font-weight:700; } button.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.heading button { margin:0; }.heading button.enabled { border-color:var(--color-online); color:var(--color-online); background:transparent; }.tool-list,.memory-list,.candidates { margin-top:12px; border:1px solid var(--color-border); border-radius:5px; }.tool-row,.memory-list article,.candidates article { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px; }.tool-row + .tool-row,.memory-list article + article,.candidates article + article { border-top:1px solid var(--color-border); }.tool-row { justify-content:start; }.tool-row input { width:16px; }.tool-row strong,.tool-row small,.memory-list strong,.memory-list small,.candidates small { display:block; }.tool-row small,.memory-list small,.candidates small,.muted { color:var(--color-text-muted); font-size:11px; }.tool-save { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; }.tool-save span { color:var(--color-text-muted); font-size:12px; }.tool-save span.dirty { color:var(--color-warning); }.tool-save button { margin:0; }.memory-list article.conflict { border-left:3px solid var(--color-error); }.memory-list article p,.candidates article p { overflow-wrap:anywhere; }.memory-list button,.candidates button { flex:0 0 auto; margin:0; }.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.error { color:var(--color-error); } button:disabled { opacity:.55; cursor:default; } @media(max-width:650px){.grid,.grid.three{grid-template-columns:1fr}.heading{align-items:center}.tool-save{align-items:start;flex-direction:column}.candidates article{align-items:start}}
 </style>

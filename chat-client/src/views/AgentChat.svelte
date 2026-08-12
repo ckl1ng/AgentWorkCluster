@@ -275,10 +275,14 @@
     if (result.status) return result.status === 'ok' ? '执行完成' : `状态：${result.status}`;
     return '执行完成';
   }
-  function settingsSaved(event) {
+  function syncAgent(event) {
     agent = event.detail.agent;
     agents.update(items => items.map(item => item.id === agent.id ? { ...item, ...agent } : item));
     void loadLocalDevice();
+  }
+
+  function settingsSaved(event) {
+    syncAgent(event);
     settingsOpen = false;
   }
   function scrollBottom() { if (messageListEl) messageListEl.scrollTop = messageListEl.scrollHeight; }
@@ -288,7 +292,7 @@
 {#if runsOpen}
   <AgentRuns {agentId} on:close={() => runsOpen = false} />
 {:else if settingsOpen}
-  <AgentSettings {agent} on:saved={settingsSaved} on:cancel={() => settingsOpen = false} />
+  <AgentSettings {agent} on:saved={settingsSaved} on:updated={syncAgent} on:cancel={() => settingsOpen = false} />
 {:else}
 <section class="agent-chat">
   <div class="agent-toolbar">

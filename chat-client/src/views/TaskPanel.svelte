@@ -1,5 +1,6 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
+  import { PanelBottomClose, PanelBottomOpen, Plus, RefreshCw } from 'lucide-svelte';
   import { api } from '../lib/api.js';
   import { agents, auth } from '../lib/store.js';
 
@@ -20,6 +21,7 @@
   let notificationOpen = false;
   let createOpen = false;
   let createSaving = false;
+  let collapsed = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
   let draft = { title: '', goal: '', assigned_agent_id: '' };
 
   const labels = {
@@ -179,8 +181,9 @@
   });
 </script>
 
-<aside class="tasks" aria-label="任务工作台">
-  <header><div><p>TASKS</p><h2>任务</h2></div><div class="header-actions"><button type="button" title="创建任务" aria-label="创建任务" on:click={() => createOpen = !createOpen}>+</button><button type="button" class:has-unread={unreadNotifications.length} title="任务通知" aria-label="任务通知" on:click={() => notificationOpen = !notificationOpen}>!<i>{unreadNotifications.length || ''}</i></button><button type="button" title="刷新任务" aria-label="刷新任务" on:click={load}>↻</button></div></header>
+<aside class="tasks" class:collapsed aria-label="任务工作台">
+  <header><div><p>TASKS</p><h2>任务</h2></div><div class="header-actions"><button type="button" title={collapsed ? '展开任务面板' : '收纳任务面板'} aria-label={collapsed ? '展开任务面板' : '收纳任务面板'} aria-expanded={!collapsed} on:click={() => collapsed = !collapsed}>{#if collapsed}<PanelBottomOpen size={17} />{:else}<PanelBottomClose size={17} />{/if}</button><button type="button" title="创建任务" aria-label="创建任务" on:click={() => { collapsed = false; createOpen = !createOpen; }}><Plus size={17} /></button><button type="button" class:has-unread={unreadNotifications.length} title="任务通知" aria-label="任务通知" on:click={() => { collapsed = false; notificationOpen = !notificationOpen; }}><span aria-hidden="true">!</span><i>{unreadNotifications.length || ''}</i></button><button type="button" title="刷新任务" aria-label="刷新任务" on:click={load}><RefreshCw size={16} /></button></div></header>
+  {#if !collapsed}
   {#if createOpen}<form class="create-task" on:submit|preventDefault={createTask}><label>标题<input bind:value={draft.title} maxlength="160" required /></label><label>目标<textarea bind:value={draft.goal} maxlength="50000" required></textarea></label><label>执行 Agent<select bind:value={draft.assigned_agent_id}><option value="">稍后指派</option>{#each $agents as agent (agent.id)}<option value={agent.id}>{agent.name}</option>{/each}</select></label><div><button type="button" class="secondary" on:click={() => createOpen = false}>取消</button><button type="submit" disabled={createSaving}>{createSaving ? '正在创建...' : '创建任务'}</button></div></form>{/if}
   {#if notificationOpen}<section class="notifications" aria-label="任务通知中心"><div class="notification-heading"><h3>通知</h3>{#if typeof Notification !== 'undefined' && Notification.permission !== 'granted'}<button type="button" on:click={requestDesktopNotifications}>启用桌面提醒</button>{/if}</div>{#each notifications as notification (notification.id)}<button type="button" class:read={notification.read_at} on:click={() => openNotification(notification)}><strong>{notification.payload?.title || '任务通知'}</strong><small>{labels[notification.kind] || notification.kind}</small></button>{:else}<p class="muted">暂无通知</p>{/each}</section>{/if}
   <div class="filters" role="tablist" aria-label="任务筛选">
@@ -215,6 +218,7 @@
       </div>{/if}
     </section>
   {/if}
+  {/if}
 </aside>
 
 <style>
@@ -229,7 +233,9 @@
     backdrop-filter: blur(18px);
     box-shadow: var(--shadow-soft);
     box-sizing: border-box;
+    transition: max-height var(--duration-normal) var(--ease-soft), padding var(--duration-normal) var(--ease-soft);
   }
+  .tasks.collapsed { min-height: 64px; overflow: hidden; padding-bottom: 8px; }
 
   header, .detail-heading, .actions, .notification-heading {
     display: flex;
@@ -318,5 +324,20 @@
 
   @media (max-width: 980px) {
     .tasks { width: 100%; max-height: 40vh; flex-basis: auto; }
+  }
+
+  @media (min-width: 981px) {
+    .tasks.collapsed { width: 64px; min-width: 64px; flex-basis: 64px; padding: 12px; }
+    .tasks.collapsed header { justify-content:center; padding: 0; }
+    .tasks.collapsed header > div:first-child,
+    .tasks.collapsed .header-actions > button:not(:first-child) { display:none; }
+  }
+
+  @media (max-width: 768px) {
+    .tasks { max-height: min(62dvh, 560px); padding: 12px; border-radius: 16px; }
+    .tasks.collapsed { flex: 0 0 64px; max-height: 64px; }
+    header { padding: 2px 0 8px; }
+    .tasks.collapsed header { padding-bottom: 0; }
+    h2 { font-size: 17px; }
   }
 </style>

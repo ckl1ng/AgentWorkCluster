@@ -6,9 +6,7 @@
   export let agent;
   const dispatch = createEventDispatcher();
   let saving = false;
-  let loadingTools = true;
   let error = '';
-  let tools = [];
   let devices = [];
   let workspaces = [];
   let loadingLocal = true;
@@ -24,7 +22,6 @@
     workspaceId: agent.default_workspace_id || '',
     modelMode: agent.model_mode || 'server_proxy',
   };
-  let assigned = new Set(agent.tool_ids || []);
   let form = {
     name: agent.name,
     description: agent.description || '',
@@ -42,12 +39,25 @@
     monthly_token_budget: agent.run_policy?.monthly_token_budget ?? 0,
     context_window: agent.run_policy?.context_window ?? 32768,
   };
-  let tool = { name: '', description: '', url: '', headers: '{}', schema: '{"type":"object","properties":{}}' };
   let activeTab = 'general';
+  let localLoaded = false;
+  let governanceDirty = false;
 
-  onMount(async () => {
-    await Promise.all([loadTools(), loadLocalDevices(), loadQqConnection()]);
-  });
+  onMount(loadQqConnection);
+
+  async function selectTab(tab) {
+    if (activeTab === 'governance' && tab !== 'governance' && governanceDirty
+      && !confirm('工具授权尚未保存，确定要放弃这些更改吗？')) return;
+    activeTab = tab;
+    if (tab === 'local' && !localLoaded) {
+      localLoaded = true;
+      await loadLocalDevices();
+    }
+  }
+
+  function requestCancel() {
+    if (!governanceDirty || confirm('工具授权尚未保存，确定要放弃这些更改吗？')) dispatch('cancel');
+  }
 
   async function loadQqConnection() {
     qqLoading = true;
@@ -93,16 +103,6 @@
     }
   }
 
-  async function loadTools() {
-    loadingTools = true;
-    try {
-      tools = await api.listTools();
-      const current = await api.listAgentTools(agent.id);
-      assigned = new Set(current.map(item => item.id));
-    } catch (e) { error = e.message || '无法加载工具'; }
-    finally { loadingTools = false; }
-  }
-
   async function loadLocalDevices() {
     loadingLocal = true;
     try {
@@ -139,7 +139,7 @@
         model_mode: local.modelMode,
       });
       agent = { ...agent, ...updated };
-      dispatch('saved', { agent });
+      dispatch('updated', { agent });
     } catch (e) {
       error = e.message || '无法绑定本地 Agent';
     } finally {
@@ -179,28 +179,6 @@
     }
   }
 
-  function toggleTool(id) {
-    const next = new Set(assigned);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    assigned = next;
-  }
-
-  async function createTool() {
-    error = '';
-    try {
-      const headers = JSON.parse(tool.headers || '{}');
-      const inputSchema = JSON.parse(tool.schema);
-      const created = await api.createTool({
-        name: tool.name.trim(), description: tool.description.trim(), kind: 'http',
-        config: { method: 'GET', url: tool.url.trim(), headers },
-        input_schema: inputSchema, confirmation_mode: 'none',
-      });
-      tools = [created, ...tools];
-      assigned = new Set([...assigned, created.id]);
-      tool = { name: '', description: '', url: '', headers: '{}', schema: '{"type":"object","properties":{}}' };
-    } catch (e) { error = e instanceof SyntaxError ? 'Headers 或输入 Schema 不是有效 JSON' : (e.message || '无法创建工具'); }
-  }
-
   async function save() {
     saving = true; error = '';
     try {
@@ -218,8 +196,7 @@
       };
       if (form.api_key) payload.api_key = form.api_key;
       const updated = await api.updateAgent(agent.id, payload);
-      await api.assignAgentTools(agent.id, [...assigned]);
-      dispatch('saved', { agent: { ...updated, tool_ids: [...assigned] } });
+      dispatch('saved', { agent: { ...updated, tool_ids: agent.tool_ids || [] } });
     } catch (e) { error = e.message || '无法保存 Agent 配置'; }
     finally { saving = false; }
   }
@@ -233,22 +210,21 @@
 </script>
 
 <section class="settings" aria-label="Agent 配置">
-  <header><div><p>AGENT CONFIG</p><h2>{agent.name}</h2></div><button type="button" class="close" title="关闭配置" aria-label="关闭配置" on:click={() => dispatch('cancel')}>×</button></header>
-  <nav class="tabs" aria-label="Agent 配置页签"><button type="button" class:active={activeTab === 'general'} on:click={() => activeTab = 'general'}>基础配置</button><button type="button" class:active={activeTab === 'local'} on:click={() => activeTab = 'local'}>本地执行</button><button type="button" class:active={activeTab === 'governance'} on:click={() => activeTab = 'governance'}>工具与记忆</button></nav>
+  <header><div><p>AGENT CONFIG</p><h2>{agent.name}</h2></div><button type="button" class="close" title="关闭配置" aria-label="关闭配置" on:click={requestCancel}>×</button></header>
+  <nav class="tabs" aria-label="Agent 配置页签"><button type="button" class:active={activeTab === 'general'} on:click={() => selectTab('general')}>基础配置</button><button type="button" class:active={activeTab === 'local'} on:click={() => selectTab('local')}>本地执行</button><button type="button" class:active={activeTab === 'governance'} on:click={() => selectTab('governance')}>工具与记忆</button></nav>
   {#if activeTab === 'general'}<form on:submit|preventDefault={save} novalidate>
     <section class="qq-execution"><div class="section-title"><div><h3>QQ Bot 连接</h3><p class="muted">AppSecret 只提交到服务端加密的 QQ Gateway，不会保存到浏览器。</p></div><span class="qq-status" class:connected={qq.status === 'connected'} class:error-status={qq.status === 'error'}>{qqLoading ? '读取中' : qq.status === 'connected' ? '已连接' : qq.status === 'connecting' ? '连接中' : qq.status === 'gateway_unavailable' ? 'Gateway 不可用' : '未连接'}</span></div><div class="two"><label>AppID<input required maxlength="128" bind:value={qqForm.appId} placeholder="QQ 开放平台 AppID" autocomplete="off" /></label><label>AppSecret<input required type="password" maxlength="256" bind:value={qqForm.appSecret} placeholder="QQ 开放平台 AppSecret" autocomplete="new-password" /></label></div><div class="two"><label>Bot ID（可选）<input maxlength="128" bind:value={qqForm.botId} placeholder="留空则连接后自动识别" /></label><label>事件 Intents<input type="number" min="1" max="2147483647" bind:value={qqForm.intents} /></label></div><div class="local-actions"><button type="button" on:click={connectQq} disabled={qqConnecting || qqLoading}>{qqConnecting ? '正在连接...' : '一键连接 QQ Bot'}</button><button type="button" class="danger" on:click={disconnectQq} disabled={qqConnecting || !qq.configured}>断开连接</button></div>{#if qq.bot_id}<p class="muted">已识别 Bot ID：{qq.bot_id}</p>{/if}{#if qq.last_error}<p class="error" role="status">{qq.last_error}</p>{/if}</section>
     <section><div class="section-title"><h3>运行状态</h3><button type="button" class:danger={agent.state === 'active'} on:click={toggleState}>{agent.state === 'active' ? '暂停 Agent' : '恢复 Agent'}</button></div></section>
     <section><h3>基础信息</h3><div class="two"><label>名称<input required maxlength="80" bind:value={form.name} /></label><label>用途<input maxlength="280" bind:value={form.description} /></label></div></section>
     <section><h3>模型连接</h3><div class="two"><label>连接名称<input required bind:value={form.model_display_name} /></label><label>模型 ID<input required bind:value={form.model_id} /></label></div><label>Base URL<input required type="url" bind:value={form.base_url} /></label><label>替换 API Key<input type="password" autocomplete="new-password" bind:value={form.api_key} placeholder="留空则保持现有密钥" /></label><div class="three"><label>温度<input type="number" min="0" max="2" step="0.1" bind:value={form.temperature} /></label><label>输出 Token<input type="number" min="1" max="32768" bind:value={form.max_tokens} /></label><label>超时（秒）<input type="number" min="5" max="300" bind:value={form.timeout_seconds} /></label></div></section>
     <section><h3>上下文与预算</h3><div class="three"><label>上下文窗口<input type="number" min="2048" bind:value={form.context_window} /></label><label>并发运行<input type="number" min="1" max="10" bind:value={form.max_concurrent_runs} /></label><label>工具调用上限<input type="number" min="0" max="20" bind:value={form.max_tool_calls} /></label></div><div class="two"><label>每日 Token（0 不限）<input type="number" min="0" bind:value={form.daily_token_budget} /></label><label>每月 Token（0 不限）<input type="number" min="0" bind:value={form.monthly_token_budget} /></label></div><label>系统提示词<textarea required rows="7" maxlength="32000" bind:value={form.system_prompt}></textarea></label></section>
-    <section><h3>只读 HTTP 工具</h3>{#if loadingTools}<p class="muted">正在加载...</p>{:else if tools.length}<div class="tool-list">{#each tools as item (item.id)}<label class="tool-row"><input type="checkbox" checked={assigned.has(item.id)} on:change={() => toggleTool(item.id)} /><span><strong>{item.name}</strong><small>{item.config?.method || 'GET'} · {item.config?.url || ''}</small></span></label>{/each}</div>{:else}<p class="muted">尚未创建工具</p>{/if}<div class="tool-create"><div class="two"><label>工具名<input pattern="[A-Za-z][A-Za-z0-9_]*" bind:value={tool.name} placeholder="weather_lookup" /></label><label>说明<input bind:value={tool.description} /></label></div><label>GET URL<input type="url" bind:value={tool.url} placeholder="https://api.example.com/weather" /></label><div class="two"><label>Headers JSON<textarea rows="3" bind:value={tool.headers}></textarea></label><label>输入 Schema JSON<textarea rows="3" bind:value={tool.schema}></textarea></label></div><button type="button" on:click={createTool} disabled={!tool.name.trim() || !tool.url.trim()}>添加并启用</button></div></section>
     {#if error}<p class="error" role="status">{error}</p>{/if}
-    <footer><button type="button" class="secondary" on:click={() => dispatch('cancel')}>取消</button><button type="submit" disabled={saving}>{saving ? '正在保存...' : '保存配置'}</button></footer>
-  </form>{:else if activeTab === 'local'}<section class="local-execution"><h3>本地设备与工作区</h3><p class="muted">服务端仅保存设备和工作区名称，不保存本机绝对路径。</p><div class="two"><label>配对会话 ID<input bind:value={pairing.id} placeholder="由 local-agent auth login 输出" /></label><label>配对码<input bind:value={pairing.code} placeholder="LA-000000" pattern="LA-[0-9]{6}" /></label></div><button type="button" class="secondary" on:click={approvePairing} disabled={approvingPairing || !pairing.id.trim() || !pairing.code.trim()}>{approvingPairing ? '正在批准...' : '批准本地设备'}</button>{#if loadingLocal}<p class="muted">正在加载...</p>{:else if !devices.length}<p class="muted">批准配对后，设备会出现在此处。</p>{:else}<div class="two"><label>设备<select bind:value={local.deviceId} on:change={selectLocalDevice}><option value="">选择设备</option>{#each devices as device (device.id)}<option value={device.id} disabled={device.status === 'revoked'}>{device.display_name} · {device.platform || 'unknown'} · {device.status}</option>{/each}</select></label><label>工作区<select bind:value={local.workspaceId} disabled={!local.deviceId || !workspaces.length}><option value="">选择工作区</option>{#each workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.display_name} · 策略 v{workspace.policy_version}</option>{/each}</select></label></div><label>模型模式<select bind:value={local.modelMode}><option value="server_proxy">服务端代理模型</option><option value="local_direct">本机直连模型</option></select></label><div class="local-actions"><button type="button" on:click={bindLocal} disabled={bindingLocal || !local.deviceId || !local.workspaceId}>{bindingLocal ? '正在绑定...' : '绑定本地执行'}</button><button type="button" class="danger" on:click={revokeLocalDevice} disabled={bindingLocal || !local.deviceId}>撤销设备</button></div>{#if agent.execution_target === 'local'}<p class="muted">当前 Agent 的新 run 不会进入云端 Worker。</p>{/if}{/if}{#if error}<p class="error" role="status">{error}</p>{/if}</section>{:else}<AgentGovernance {agent} on:saved={event => dispatch('saved', event.detail)} />{/if}
+    <footer><button type="button" class="secondary" on:click={requestCancel}>取消</button><button type="submit" disabled={saving}>{saving ? '正在保存...' : '保存配置'}</button></footer>
+  </form>{:else if activeTab === 'local'}<section class="local-execution"><h3>本地设备与工作区</h3><p class="muted">服务端仅保存设备和工作区名称，不保存本机绝对路径。</p><div class="two"><label>配对会话 ID<input bind:value={pairing.id} placeholder="由 local-agent auth login 输出" /></label><label>配对码<input bind:value={pairing.code} placeholder="LA-000000" pattern="LA-[0-9]{6}" /></label></div><button type="button" class="secondary" on:click={approvePairing} disabled={approvingPairing || !pairing.id.trim() || !pairing.code.trim()}>{approvingPairing ? '正在批准...' : '批准本地设备'}</button>{#if loadingLocal}<p class="muted">正在加载...</p>{:else if !devices.length}<p class="muted">批准配对后，设备会出现在此处。</p>{:else}<div class="two"><label>设备<select bind:value={local.deviceId} on:change={selectLocalDevice}><option value="">选择设备</option>{#each devices as device (device.id)}<option value={device.id} disabled={device.status === 'revoked'}>{device.display_name} · {device.platform || 'unknown'} · {device.status}</option>{/each}</select></label><label>工作区<select bind:value={local.workspaceId} disabled={!local.deviceId || !workspaces.length}><option value="">选择工作区</option>{#each workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.display_name} · 策略 v{workspace.policy_version}</option>{/each}</select></label></div><label>模型模式<select bind:value={local.modelMode}><option value="server_proxy">服务端代理模型</option><option value="local_direct">本机直连模型</option></select></label><div class="local-actions"><button type="button" on:click={bindLocal} disabled={bindingLocal || !local.deviceId || !local.workspaceId}>{bindingLocal ? '正在绑定...' : '绑定本地执行'}</button><button type="button" class="danger" on:click={revokeLocalDevice} disabled={bindingLocal || !local.deviceId}>撤销设备</button></div>{#if agent.execution_target === 'local'}<p class="muted">当前 Agent 的新 run 不会进入云端 Worker。</p>{/if}{/if}{#if error}<p class="error" role="status">{error}</p>{/if}</section>{:else}<AgentGovernance {agent} on:updated={event => dispatch('updated', event.detail)} on:dirty={event => governanceDirty = event.detail.tools} />{/if}
 </section>
 
 <style>
-  .settings { flex: 1; min-width: 0; overflow-y: auto; padding: 26px max(18px, 6vw) 48px; }.settings > header, form, .tabs, .local-execution, .settings :global(.governance) { max-width: 860px; }.settings > header { display: flex; justify-content: space-between; margin-bottom: 20px; }.settings > header p { color: var(--color-primary); font-size: 10px; font-weight: 700; letter-spacing: 1px; }h2 { margin-top: 3px; font-size: 22px; }.tabs { display:flex; gap:6px; margin-bottom:8px; border-bottom:1px solid var(--color-border); }.tabs button { margin-bottom:-1px; border-color:transparent; border-radius:0; background:transparent; color:var(--color-text-muted); }.tabs button.active { border-bottom-color:var(--color-primary); color:var(--color-primary); }section section, .local-execution { padding: 18px 0; border-top: 1px solid var(--color-border); }h3 { font-size: 14px; }.section-title { display: flex; align-items: center; justify-content: space-between; }.two,.three { display: grid; gap: 12px; }.two { grid-template-columns: repeat(2,minmax(0,1fr)); }.three { grid-template-columns: repeat(3,minmax(0,1fr)); }label { display: grid; gap: 6px; margin-top: 12px; color: var(--color-text-muted); font-size: 12px; font-weight: 600; }input,textarea,select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; font-size: 13px; outline: none; resize: vertical; }input:focus,textarea:focus,select:focus { border-color: var(--color-primary); }button { min-height: 34px; padding: 0 12px; border: 1px solid var(--color-primary); border-radius: 4px; background: var(--color-primary); color: #fff; cursor: pointer; font-size: 12px; font-weight: 700; }.close { display:grid; width:34px; place-items:center; padding:0; border-color:var(--color-border); background:transparent; color:var(--color-text-muted); font-size:22px; }.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.tool-list { margin-top: 10px; border:1px solid var(--color-border); border-radius:5px; }.tool-row { display:flex; align-items:center; gap:10px; margin:0; padding:10px; }.tool-row + .tool-row { border-top:1px solid var(--color-border); }.tool-row input { width:16px; }.tool-row span { min-width:0; }.tool-row strong,.tool-row small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.tool-row strong { color:var(--color-text); }.tool-row small,.muted { margin-top:3px; color:var(--color-text-muted); font-size:11px; }.tool-create { margin-top:16px; padding-top:4px; border-top:1px dashed var(--color-border); }.tool-create > button { margin-top:10px; }.local-execution > button { margin-top:16px; }.local-actions { display:flex; gap:8px; margin-top:16px; }.local-actions button { margin:0; }footer { display:flex; justify-content:flex-end; gap:8px; padding-top:18px; }.error { margin-top:12px; color:var(--color-error); font-size:12px; }button:disabled { opacity:.55; cursor:default; }
+  .settings { flex: 1; min-width: 0; overflow-y: auto; padding: 26px max(18px, 6vw) 48px; }.settings > header, form, .tabs, .local-execution, .settings :global(.governance) { max-width: 860px; }.settings > header { display: flex; justify-content: space-between; margin-bottom: 20px; }.settings > header p { color: var(--color-primary); font-size: 10px; font-weight: 700; letter-spacing: 1px; }h2 { margin-top: 3px; font-size: 22px; }.tabs { display:flex; gap:6px; margin-bottom:8px; border-bottom:1px solid var(--color-border); }.tabs button { margin-bottom:-1px; border-color:transparent; border-radius:0; background:transparent; color:var(--color-text-muted); }.tabs button.active { border-bottom-color:var(--color-primary); color:var(--color-primary); }section section, .local-execution { padding: 18px 0; border-top: 1px solid var(--color-border); }h3 { font-size: 14px; }.section-title { display: flex; align-items: center; justify-content: space-between; }.two,.three { display: grid; gap: 12px; }.two { grid-template-columns: repeat(2,minmax(0,1fr)); }.three { grid-template-columns: repeat(3,minmax(0,1fr)); }label { display: grid; gap: 6px; margin-top: 12px; color: var(--color-text-muted); font-size: 12px; font-weight: 600; }input,textarea,select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; font-size: 13px; outline: none; resize: vertical; }input:focus,textarea:focus,select:focus { border-color: var(--color-primary); }button { min-height: 34px; padding: 0 12px; border: 1px solid var(--color-primary); border-radius: 4px; background: var(--color-primary); color: #fff; cursor: pointer; font-size: 12px; font-weight: 700; }.close { display:grid; width:34px; place-items:center; padding:0; border-color:var(--color-border); background:transparent; color:var(--color-text-muted); font-size:22px; }.secondary { border-color:var(--color-border); background:transparent; color:var(--color-text-muted); }.danger { border-color:var(--color-error); background:transparent; color:var(--color-error); }.local-execution > button { margin-top:16px; }.local-actions { display:flex; gap:8px; margin-top:16px; }.local-actions button { margin:0; }footer { display:flex; justify-content:flex-end; gap:8px; padding-top:18px; }.error { margin-top:12px; color:var(--color-error); font-size:12px; }button:disabled { opacity:.55; cursor:default; }
   @media(max-width:650px){.settings{padding:20px 14px 36px}.two,.three{grid-template-columns:1fr}}
   .qq-execution { padding: 18px 0; border-top: 1px solid var(--color-border); }.qq-execution .section-title { align-items: flex-start; }.qq-status { padding: 4px 8px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-muted); font-size: 11px; font-weight: 700; }.qq-status.connected { border-color: var(--color-online); color: var(--color-online); }.qq-status.error-status { border-color: var(--color-error); color: var(--color-error); }
 </style>
