@@ -10,6 +10,7 @@
   let memories = [];
   let assigned = new Set(agent.tool_ids || []);
   let savedAssigned = new Set(agent.tool_ids || []);
+  let toolAssignmentsDirty = false;
   let savingTools = false;
   let savingMemory = false;
   let tool = { name: '', description: '', kind: 'http', method: 'GET', url: '', command: '', args: '', headers: '{}', schema: '{"type":"object","properties":{}}', sideEffect: 'read', confirmationMode: 'none', rateLimit: 6, parameterLocations: '{}' };
@@ -30,6 +31,7 @@
       tools = available;
       assigned = new Set(current.map(item => item.id));
       savedAssigned = new Set(assigned);
+      toolAssignmentsDirty = false;
       memories = storedMemories;
     } catch (e) { error = e.message || '无法加载治理配置'; }
     finally { loading = false; }
@@ -43,17 +45,19 @@
     const next = new Set(assigned);
     if (next.has(id)) next.delete(id); else next.add(id);
     assigned = next;
+    toolAssignmentsDirty = hasUnsavedToolAssignments();
     error = '';
-    dispatch('dirty', { tools: hasUnsavedToolAssignments() });
+    dispatch('dirty', { tools: toolAssignmentsDirty });
   }
 
   async function saveToolAssignments() {
-    if (!hasUnsavedToolAssignments() || savingTools) return;
+    if (!toolAssignmentsDirty || savingTools) return;
     savingTools = true;
     error = '';
     try {
       const updated = await api.assignAgentTools(agent.id, [...assigned]);
       savedAssigned = new Set(assigned);
+      toolAssignmentsDirty = false;
       dispatch('dirty', { tools: false });
       dispatch('updated', { agent: { ...agent, ...updated, tool_ids: [...assigned] } });
     } catch (e) { error = e.message || '无法更新工具分配'; }
@@ -126,6 +130,7 @@
       tools = [created, ...tools];
       if (!assigned.has(created.id)) {
         assigned = new Set([...assigned, created.id]);
+        toolAssignmentsDirty = true;
         dispatch('dirty', { tools: true });
       }
       tool = { name: '', description: '', kind: 'http', method: 'GET', url: '', headers: '{}', schema: '{"type":"object","properties":{}}', sideEffect: 'read', confirmationMode: 'none', rateLimit: 6, parameterLocations: '{}' };
@@ -207,8 +212,8 @@
       {:else}<p class="muted">尚未创建工具</p>{/each}
     </div>{/if}
     <div class="tool-save">
-      <span class:dirty={hasUnsavedToolAssignments()}>{hasUnsavedToolAssignments() ? '有未保存的工具授权' : '工具授权已保存'}</span>
-      <button type="button" on:click={saveToolAssignments} disabled={!hasUnsavedToolAssignments() || savingTools}>{savingTools ? '正在保存...' : '保存工具授权'}</button>
+      <span class:dirty={toolAssignmentsDirty}>{toolAssignmentsDirty ? '有未保存的工具授权' : '工具授权已保存'}</span>
+      <button type="button" on:click={saveToolAssignments} disabled={!toolAssignmentsDirty || savingTools}>{savingTools ? '正在保存...' : '保存工具授权'}</button>
     </div>
   </section>
 
