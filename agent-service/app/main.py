@@ -25,7 +25,8 @@ from pydantic import BaseModel, Field
 from .evaluation import FAILURE_CATEGORIES
 from .db import Connection, Row
 from .harness import (
-    ModelTurn, discover_mcp_stdio, execute_http_tool, execute_local_tool, execute_mcp_tool,
+    AMAP_WEATHER_INPUT_SCHEMA, ModelTurn, discover_mcp_stdio, execute_amap_weather_tool,
+    execute_http_tool, execute_local_tool, execute_mcp_tool,
     execute_stdio_mcp_tool, prepare_context, safe_http_transport, stream_chat, tool_declarations,
 )
 from .safety import audit_payload, assert_public_peer, assert_safe_public_url, openapi_operations, redact, require_object_schema
@@ -96,6 +97,11 @@ BUILTIN_TOOLS = [
         "config": {"command": BUILTIN_WEB_SEARCH_COMMAND, "args": BUILTIN_WEB_SEARCH_ARGS, "remote_tool_name": "read_url", "timeout_seconds": 30, "source": "simple-web-search-mcp"},
         "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}}, "required": ["url"], "additionalProperties": False},
         "confirmation_mode": "none", "side_effect": "read", "provider_version": "mcp-stdio-v1",
+    },
+    {
+        "name": "amap_weather", "description": "查询指定城市 adcode 的高德实况或预报天气。", "kind": "http",
+        "config": {"builtin": "amap_weather"}, "input_schema": AMAP_WEATHER_INPUT_SCHEMA,
+        "confirmation_mode": "none", "side_effect": "read", "provider_version": "amap-weather-v1",
     },
 ]
 
@@ -1281,6 +1287,60 @@ class AgentStore:
             self.db.commit()
         return result
 
+    def resume_task(self, task_id: str, owner_id: int, idempotency_key: Optional[str] = None,
+                    expected_state_version: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Create a fresh execution attempt for a proposer-requested rework."""
+        principal = self._principal("user", owner_id)
+        with self.lock:
+            task = self._task_for_owner(task_id, owner_id)
+            if task is None:
+                return None
+            self._require_task_proposer(task, principal)
+            existing = self._task_command_response(owner_id, task_id, principal, "task.reopen", idempotency_key)
+            if existing is not None:
+                return existing
+            if expected_state_version is not None and int(task["state_version"]) != expected_state_version:
+                raise ValueError("任务状态已更新，请刷新后重试")
+            if task["state"] not in {"awaiting_proposer_close", "attention_required"}:
+                raise ValueError("当前任务状态不允许继续处理")
+            agent_id = task["assigned_agent_id"]
+            if not agent_id or self.get_agent(agent_id, owner_id) is None:
+                raise ValueError("任务没有可用于继续处理的执行 Agent，请重新指派")
+            require_task_transition(task["state"], "assigned")
+            self._supersede_active_assignments(task_id)
+            assignment = self._create_task_assignment(task_id, owner_id, "cloud_agent", agent_id, principal)
+            timestamp = now()
+            conversation_id = str(uuid.uuid4())
+            self.db.execute(
+                "INSERT INTO conversations VALUES (?, ?, ?, ?, 0, NULL, ?, ?)",
+                (conversation_id, agent_id, owner_id, task["title"], timestamp, timestamp),
+            )
+            state_version = int(task["state_version"]) + 1
+            self.db.execute(
+                """UPDATE tasks SET state = 'assigned', conversation_id = ?, state_version = ?, updated_at = ?
+                   WHERE id = ?""",
+                (conversation_id, state_version, timestamp, task_id),
+            )
+            self._append_task_context(task_id, "task.reopened", "提出者要求基于现有上下文继续处理。", "user", str(owner_id), {
+                "assignment_id": assignment["id"],
+            })
+            self._append_task_dispatch(
+                task_id, "task.assigned", "任务已创建新的执行尝试", "user", str(owner_id),
+                {"agent_id": agent_id, "assignment_id": assignment["id"], "state_version": state_version},
+            )
+            self.db.commit()
+        run = self.create_run(conversation_id, owner_id, self._decrypt_text(task["goal_encrypted"]), task_id, assignment["id"])
+        result = self.get_task(task_id, owner_id)
+        if result is None:
+            raise RuntimeError("任务继续处理后无法读取")
+        result["assignment_id"] = assignment["id"]
+        if run and not run.get("error"):
+            result["run_id"] = run["id"]
+        with self.lock:
+            self._remember_task_command(owner_id, task_id, principal, "task.reopen", idempotency_key, result)
+            self.db.commit()
+        return result
+
     def get_task(self, task_id: str, owner_id: int) -> Optional[Dict[str, Any]]:
         with self.lock:
             row = self._task_for_owner(task_id, owner_id)
@@ -2288,6 +2348,7 @@ All state-changing operations require structured, authorized tools and are check
                 self.db.rollback()
                 return False
             self.db.commit()
+        self.sync_task_run_state(run_id, "running")
         return True
 
     def renew_local_lease(self, run_id: str, device_id: str, lease_id: str) -> Optional[bool]:
@@ -2324,13 +2385,38 @@ All state-changing operations require structured, authorized tools and are check
             self.update_run(run_id, state, final_content=content, error_message=error)
         except ValueError:
             return False
-        self.sync_task_run_state(run_id, state, content=content, error=error)
+        if state == "completed" and self._submit_local_task_result(run_id, content):
+            pass
+        else:
+            self.sync_task_run_state(run_id, state, content=content, error=error)
         with self.lock:
             self.db.execute("UPDATE local_run_dispatches SET executor_state = ? WHERE run_id = ?", (state, run_id))
             self.db.commit()
         if state == "completed" and content and conversation is not None:
             self.add_message(conversation["conversation_id"], run_id, "assistant", content, int(conversation["context_epoch"]))
         return True
+
+    def _submit_local_task_result(self, run_id: str, content: str) -> bool:
+        """Accept a lease-authenticated local text completion as its Task result."""
+        if not content.strip():
+            return False
+        with self.lock:
+            row = self.db.execute(
+                """SELECT r.task_id, r.assignment_id, r.agent_id, t.owner_user_id FROM runs r
+                   JOIN tasks t ON t.id = r.task_id WHERE r.id = ? AND r.task_id IS NOT NULL""", (run_id,),
+            ).fetchone()
+        if row is None or not row["assignment_id"]:
+            return False
+        try:
+            submitted = self.submit_task_result(
+                row["task_id"], int(row["owner_user_id"]), row["assignment_id"],
+                self._principal("cloud_agent", row["agent_id"]), content.strip(),
+                evidence_manifest={"source": "local_direct_run", "run_id": run_id},
+                risk_summary="本机执行仅支持文本模型运行，未执行本机工具。",
+            )
+        except (PermissionError, ValueError):
+            return False
+        return submitted is not None
 
     def bind_local_agent(self, agent_id: str, owner_id: int, device_id: str, workspace_id: str, model_mode: str) -> Optional[Dict[str, Any]]:
         device = self.get_local_device(device_id, owner_id)
@@ -3879,20 +3965,22 @@ async def reopen_task(task_id: str, idempotency_key: Optional[str] = Header(None
                       expected_state_version: Optional[int] = Header(None, alias="X-Task-State-Version"),
                       authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     user = await authenticated_user(authorization)
-    task = database().get_task(task_id, user["user_id"])
-    if task is None:
-        raise HTTPException(status_code=404, detail="任务未找到")
-    target = "in_progress" if task["state"] == "awaiting_proposer_close" else "queued"
     try:
-        result = database().transition_task(
-            task_id, user["user_id"], target, "提出者要求继续处理任务", idempotency_key=idempotency_key,
+        result = database().resume_task(
+            task_id, user["user_id"], idempotency_key=idempotency_key,
             expected_state_version=expected_state_version,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return result  # type: ignore[return-value]
+    if result is None:
+        raise HTTPException(status_code=404, detail="任务未找到")
+    if result.get("run_id"):
+        run = database().get_run(result["run_id"], user["user_id"])
+        if run is not None and not run.get("local_dispatch"):
+            await enqueue_run(result["run_id"])
+    return result
 
 
 @app.post("/api/v1/tasks/{task_id}/cancel")
@@ -4094,6 +4182,10 @@ async def publish_event(event: Dict[str, Any]) -> None:
 async def execute_tool(tool: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Dispatch every provider through one policy-controlled runtime boundary."""
     kind = tool.get("kind", "http")
+    if (tool.get("config") or {}).get("builtin") == "amap_weather":
+        return await execute_amap_weather_tool(
+            arguments, os.getenv("AMAP_WEATHER_API_KEY", ""), settings.allow_http, settings.tool_response_limit,
+        )
     if kind == "mcp":
         return await execute_mcp_tool(tool, arguments, settings.allow_http, settings.tool_response_limit)
     if kind == "mcp_stdio":

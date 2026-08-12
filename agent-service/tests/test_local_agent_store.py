@@ -128,6 +128,29 @@ class LocalAgentStoreTest(unittest.TestCase):
         self.assertTrue(self.store.claim_local_run(run["id"], device["id"], second["lease_id"], "session-1"))
         self.assertEqual(self.store.get_run(run["id"], 7)["state"], "running")
 
+    def test_local_direct_task_claim_and_completion_reaches_proposer_review(self):
+        direct_agent = self.store.create_agent(7, agent_payload(
+            name="Task Direct Agent", api_key="", execution_target="local", model_mode="local_direct",
+        ))
+        device = self.store.create_local_device(7, {"display_name": "workstation"})
+        workspace = self.store.add_local_workspace(7, device["id"], {"display_name": "project"})
+        self.store.register_local_model(device["id"], {
+            "agent_id": direct_agent["id"], "base_url": "https://local-model.example/v1", "model_id": "local-model",
+        })
+        self.store.bind_local_agent(direct_agent["id"], 7, device["id"], workspace["id"], "local_direct")
+        task = self.store.create_task(7, {
+            "title": "local task", "goal": "produce a local result", "assigned_agent_id": direct_agent["id"],
+        })
+
+        offer = self.store.offer_local_run(device["id"])
+        self.assertTrue(self.store.claim_local_run(task["run_id"], device["id"], offer["lease_id"], "session-task"))
+        self.assertEqual(self.store.get_task(task["id"], 7)["state"], "in_progress")
+        self.assertTrue(self.store.finish_local_run(task["run_id"], device["id"], offer["lease_id"], "completed", "local task result"))
+
+        completed = self.store.get_task(task["id"], 7)
+        self.assertEqual(completed["state"], "awaiting_proposer_close")
+        self.assertEqual(self.store.task_results(task["id"], 7)[0]["result"], "local task result")
+
 
 if __name__ == "__main__":
     unittest.main()

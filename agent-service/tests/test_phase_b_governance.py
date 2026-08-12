@@ -64,7 +64,7 @@ class PhaseBGovernanceTest(unittest.TestCase):
         tools = self.store.list_tools(11)
         builtin_ids = {tool["id"] for tool in tools if tool["builtin"]}
 
-        self.assertEqual(len(builtin_ids), 3)
+        self.assertEqual(len(builtin_ids), 4)
         self.assertEqual(self.store.tool_ids(self.agent["id"]), [])
         self.store.set_agent_tools(self.agent["id"], 11, list(builtin_ids))
         self.assertEqual(set(self.store.tool_ids(self.agent["id"])), builtin_ids)

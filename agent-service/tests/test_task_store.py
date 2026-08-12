@@ -292,6 +292,28 @@ class TaskStoreTest(unittest.TestCase):
         run = self.store.get_run(reassigned["run_id"], 7)
         self.assertEqual(run["assignment_id"], assignments[-1]["id"])
 
+    def test_resume_task_creates_a_fresh_assignment_and_run(self):
+        agent = self.store.create_agent(7, {
+            "name": "Rework executor", "base_url": "https://model.example/v1", "api_key": "secret",
+            "model_id": "test-model", "system_prompt": "system",
+        })
+        task = self.store.create_task(7, {"title": "rework", "goal": "improve the result", "assigned_agent_id": agent["id"]})
+        first_assignment = self.store.task_assignments(task["id"], 7)[0]
+        self.store.sync_task_run_state(task["run_id"], "running")
+        self.store.submit_task_result(
+            task["id"], 7, first_assignment["id"], {"kind": "cloud_agent", "id": agent["id"]}, "first result",
+        )
+
+        resumed = self.store.resume_task(task["id"], 7, "rework-1")
+
+        self.assertEqual(resumed["state"], "assigned")
+        self.assertNotEqual(resumed["run_id"], task["run_id"])
+        assignments = self.store.task_assignments(task["id"], 7)
+        self.assertEqual([item["attempt"] for item in assignments], [1, 2])
+        self.assertEqual(assignments[0]["state"], "completed")
+        self.assertEqual(assignments[1]["state"], "assigned")
+        self.assertEqual(self.store.get_run(resumed["run_id"], 7)["state"], "queued")
+
     def test_executor_submission_requires_matching_assignment_and_creates_result(self):
         agent = self.store.create_agent(7, {
             "name": "Executor", "base_url": "https://model.example/v1", "api_key": "secret",

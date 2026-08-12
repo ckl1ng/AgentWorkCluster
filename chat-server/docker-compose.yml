@@ -31,6 +31,7 @@ services:
       - CHAT_AUTH_INTROSPECTION_URL=http://chat-server:9010/internal/v1/auth/introspect
       - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
       - AGENT_MASTER_KEY=${AGENT_MASTER_KEY:?set AGENT_MASTER_KEY in your environment}
+      - AMAP_WEATHER_API_KEY=${AMAP_WEATHER_API_KEY:-}
       - QQ_GATEWAY_INTERNAL_URL=http://qq-gateway:9013
       - REDIS_URL=redis://redis:6379/0
     depends_on:
@@ -60,6 +61,7 @@ services:
       - CHAT_AUTH_INTROSPECTION_URL=http://chat-server:9010/internal/v1/auth/introspect
       - AGENT_SERVICE_SECRET=${AGENT_SERVICE_SECRET:?set AGENT_SERVICE_SECRET in your environment}
       - AGENT_MASTER_KEY=${AGENT_MASTER_KEY:?set AGENT_MASTER_KEY in your environment}
+      - AMAP_WEATHER_API_KEY=${AMAP_WEATHER_API_KEY:-}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       redis:

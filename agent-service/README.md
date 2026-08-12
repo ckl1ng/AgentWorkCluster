@@ -57,6 +57,7 @@ python -m app.worker
 | `REDIS_URL` | 运行与任务派发、跨进程事件；为空时使用开发退化路径 |
 | `AGENT_ALLOW_HTTP` | 是否允许模型和工具使用 HTTP；生产环境保持 `false` |
 | `AGENT_TOOL_RESPONSE_LIMIT` | 单次工具响应上限，默认 1 MiB |
+| `AMAP_WEATHER_API_KEY` | 内置高德天气工具的服务端密钥；未设置时该工具会明确报配置缺失，密钥不会写入数据库或返回给模型 |
 
 生产环境的 schema 由 Alembic 管理。SQLite 仅用于开发和测试；不要把本地 SQLite 文件直接当作生产迁移方案。
 
@@ -64,6 +65,7 @@ python -m app.worker
 
 - `POST /api/v1/agent-conversations/{id}/runs` 创建不可变运行快照；Worker 调用模型、执行已授权工具，并把脱敏事件推送至 `/agent/ws`。
 - 工具按 `read`、`write`、`destructive` 分级。非 `GET`/`HEAD` 不能是 `read`；写操作需确认，破坏性操作逐次确认。
+- 内置工具目录包含高德天气查询（`amap_weather`）；为 Agent 授权该工具即可按城市 adcode 查询，服务端从 `AMAP_WEATHER_API_KEY` 读取密钥，无需导入或配置密钥。
 - Task API 与 `/task/ws` 提供预算受限、上下文隔离的多 Agent 委派；Task run 不能绕过服务端定义的任务工具。
 - `/api/v1/local-agent*` 与 `/local-agent/ws` 用于设备配对、工作区同步和 `local_direct` 派发。当前本地 daemon 仅执行文本模型运行，不支持本机文件/进程工具、工具确认或断线恢复。
 

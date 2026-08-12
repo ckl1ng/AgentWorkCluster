@@ -142,6 +142,7 @@ Task 是归属用户、有明确提出者（`proposer_kind`: user/agent）的工
 | `REDIS_URL` | 派发 Streams + 实时 Pub/Sub；为空时退化为进程内编排 |
 | `AGENT_ALLOW_HTTP` | 工具/模型 URL 是否允许 http（默认 false） |
 | `AGENT_TOOL_RESPONSE_LIMIT` | 工具响应字节上限（默认 1 MiB） |
+| `AMAP_WEATHER_API_KEY` | 内置高德天气查询的服务端密钥；仅在出站请求时读取，绝不入库、记录或回传 |
 
 ## 常用任务
 

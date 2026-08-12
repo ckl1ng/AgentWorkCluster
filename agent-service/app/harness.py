@@ -16,6 +16,19 @@ from jsonschema import Draft202012Validator, ValidationError
 from .safety import assert_public_peer, assert_safe_public_url, is_public_address, response_summary
 
 
+AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
+AMAP_WEATHER_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string", "pattern": "^[0-9]{6}$", "description": "城市 adcode，例如 310000"},
+        "extensions": {"type": "string", "enum": ["base", "all"], "default": "base"},
+        "output": {"type": "string", "enum": ["JSON", "XML"], "default": "JSON"},
+    },
+    "required": ["city"],
+    "additionalProperties": False,
+}
+
+
 class SafeNetworkBackend(httpcore.AsyncNetworkBackend):
     """Resolve once, reject non-public answers, then connect to the checked IP."""
 
@@ -278,6 +291,45 @@ async def execute_http_tool(
         "content_type": content_type[:120],
         "content": response_summary(bytes(body), content_type),
     }
+
+
+async def execute_amap_weather_tool(
+    arguments: Dict[str, Any], api_key: str, allow_http: bool, response_limit: int,
+) -> Dict[str, Any]:
+    """Query the fixed Amap endpoint without exposing its service credential."""
+    if not api_key:
+        raise RuntimeError("高德天气工具未配置 AMAP_WEATHER_API_KEY")
+    try:
+        Draft202012Validator(AMAP_WEATHER_INPUT_SCHEMA).validate(arguments)
+    except ValidationError as exc:
+        raise ValueError("Tool arguments do not match schema: " + exc.message) from exc
+
+    # The credential is added only to this outbound request. It is absent from
+    # the tool declaration, database configuration, snapshots, and trace events.
+    request_tool = {
+        "config": {
+            "url": AMAP_WEATHER_URL,
+            "method": "GET",
+            "parameter_locations": {
+                "key": "query", "city": "query", "extensions": "query", "output": "query",
+            },
+        },
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **AMAP_WEATHER_INPUT_SCHEMA["properties"],
+                "key": {"type": "string", "minLength": 1},
+            },
+            "required": ["key", "city"],
+            "additionalProperties": False,
+        },
+    }
+    return await execute_http_tool(request_tool, {
+        "key": api_key,
+        "city": arguments["city"],
+        "extensions": arguments.get("extensions", "base"),
+        "output": arguments.get("output", "JSON"),
+    }, allow_http, response_limit)
 
 
 async def execute_mcp_tool(
