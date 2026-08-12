@@ -1,9 +1,10 @@
-"""QQ Bot Webhook gateway for the Agent platform."""
+"""QQ Bot WebSocket gateway for the Agent platform."""
 
 import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -12,7 +13,7 @@ import time
 from urllib.parse import urlparse
 from dataclasses import asdict, dataclass
 from threading import RLock
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 import websockets
@@ -23,6 +24,23 @@ from fastapi.responses import JSONResponse
 
 MENTION_RE = re.compile(r"<@!?[A-Za-z0-9_-]+>")
 SUPPORTED_EVENTS = {"GROUP_AT_MESSAGE_CREATE": "group", "C2C_MESSAGE_CREATE": "c2c"}
+GROUP_AND_C2C_EVENT_INTENT = 1 << 25
+MAX_QQ_INTENTS = (1 << 31) - 1
+
+# QQ Gateway opcodes. 12 and 13 belong to the retired HTTP callback flow and
+# must never be treated as WebSocket events.
+OP_DISPATCH = 0
+OP_HEARTBEAT = 1
+OP_IDENTIFY = 2
+OP_RESUME = 6
+OP_RECONNECT = 7
+OP_INVALID_SESSION = 9
+OP_HELLO = 10
+OP_HEARTBEAT_ACK = 11
+OP_HTTP_CALLBACK_ACK = 12
+OP_CALLBACK_VERIFY = 13
+
+event_logger = logging.getLogger("qq_gateway.events")
 
 
 def _now() -> float:
@@ -34,6 +52,7 @@ class Settings:
         self.app_id = os.getenv("QQ_APP_ID", "")
         self.client_secret = os.getenv("QQ_CLIENT_SECRET", "")
         self.api_base_url = os.getenv("QQ_API_BASE_URL", "https://api.bot.qq.com").rstrip("/")
+        self.token_api_base_url = os.getenv("QQ_TOKEN_API_BASE_URL", "https://bots.qq.com").rstrip("/")
         self.bot_id = os.getenv("QQ_BOT_ID", self.app_id)
         self.agent_url = os.getenv("QQ_AGENT_INTERNAL_URL", "http://127.0.0.1:9011").rstrip("/")
         self.agent_service_secret = os.getenv("AGENT_SERVICE_SECRET", "")
@@ -47,7 +66,8 @@ class Settings:
         self.retry_after_seconds = float(os.getenv("QQ_EVENT_RETRY_AFTER_SECONDS", "10"))
         self.passive_reply_window = float(os.getenv("QQ_PASSIVE_REPLY_WINDOW_SECONDS", "290"))
         self.retry_interval_seconds = float(os.getenv("QQ_EVENT_RETRY_INTERVAL_SECONDS", "5"))
-        self.intents = int(os.getenv("QQ_INTENTS", "513"))
+        self.max_event_tasks = int(os.getenv("QQ_MAX_EVENT_TASKS", "32"))
+        self.intents = int(os.getenv("QQ_INTENTS", str(GROUP_AND_C2C_EVENT_INTENT)))
 
     def validate(self) -> None:
         required = {"AGENT_SERVICE_SECRET": self.agent_service_secret, "QQ_GATEWAY_MASTER_KEY": self.master_key}
@@ -67,8 +87,10 @@ class Settings:
             raise RuntimeError("QQ_WEBHOOK_SIGNATURE_MODE must be ed25519, hmac-sha256, or none")
         if min(self.run_timeout, self.retry_after_seconds, self.passive_reply_window, self.retry_interval_seconds) <= 0:
             raise RuntimeError("QQ Gateway timeout and retry settings must be positive")
-        if not 1 <= self.intents <= 4095:
-            raise RuntimeError("QQ_INTENTS must be between 1 and 4095")
+        if self.max_event_tasks < 1:
+            raise RuntimeError("QQ_MAX_EVENT_TASKS must be positive")
+        if not 1 <= self.intents <= MAX_QQ_INTENTS:
+            raise RuntimeError("QQ_INTENTS must be a positive 32-bit integer")
 
 class GatewayStore:
     """Durable encrypted inbox and provider-to-Agent conversation mapping."""
@@ -105,7 +127,7 @@ class GatewayStore:
                   agent_id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL,
                   app_id TEXT NOT NULL, client_secret_encrypted BLOB NOT NULL,
                   bot_id TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL,
-                  intents INTEGER NOT NULL DEFAULT 513, status TEXT NOT NULL DEFAULT 'disconnected',
+                  intents INTEGER NOT NULL DEFAULT 33554432, status TEXT NOT NULL DEFAULT 'disconnected',
                   last_error TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
                 );
                 """
@@ -157,6 +179,11 @@ class GatewayStore:
             self.db.execute("UPDATE inbox_events SET run_id = ?, updated_at = ? WHERE event_key = ?", (run_id, _now(), event_key))
             self.db.commit()
 
+    def touch_event(self, event_key: str) -> None:
+        with self.lock:
+            self.db.execute("UPDATE inbox_events SET updated_at = ? WHERE event_key = ? AND status = 'processing'", (_now(), event_key))
+            self.db.commit()
+
     def complete_event(self, event_key: str) -> None:
         with self.lock:
             self.db.execute("UPDATE inbox_events SET status = 'completed', updated_at = ? WHERE event_key = ?", (_now(), event_key))
@@ -187,17 +214,19 @@ class GatewayStore:
             )
             self.db.commit()
 
-    def claim_outbound(self, event_key: str) -> bool:
+    def claim_outbound(self, event_key: str) -> str:
         with self.lock:
-            row = self.db.execute("SELECT status FROM outbound_messages WHERE event_key = ?", (event_key,)).fetchone()
+            row = self.db.execute("SELECT status, updated_at FROM outbound_messages WHERE event_key = ?", (event_key,)).fetchone()
             if row is not None and row["status"] == "sent":
-                return False
+                return "sent"
+            if row is not None and row["status"] == "sending" and _now() - float(row["updated_at"]) < settings.retry_after_seconds:
+                return "inflight"
             if row is None:
                 self.db.execute("INSERT INTO outbound_messages(event_key, status, attempts, updated_at) VALUES (?, 'sending', 1, ?)", (event_key, _now()))
             else:
                 self.db.execute("UPDATE outbound_messages SET status = 'sending', attempts = attempts + 1, updated_at = ? WHERE event_key = ?", (_now(), event_key))
             self.db.commit()
-            return True
+            return "claimed"
 
     def complete_outbound(self, event_key: str, message_id: str = "") -> None:
         with self.lock:
@@ -279,7 +308,7 @@ class QQConnectionConfig:
     client_secret: str
     bot_id: str = ""
     api_base_url: str = "https://api.bot.qq.com"
-    intents: int = 513
+    intents: int = GROUP_AND_C2C_EVENT_INTENT
 
 
 class QQApiClient:
@@ -293,21 +322,37 @@ class QQApiClient:
     async def close(self) -> None:
         await self.client.aclose()
 
+    @staticmethod
+    def _token_from_body(body: Any) -> Tuple[str, int]:
+        if not isinstance(body, dict):
+            raise RuntimeError("QQ token response is not a JSON object")
+        data = body.get("data", body)
+        if not isinstance(data, dict):
+            data = {}
+        token = data.get("access_token") or data.get("accessToken") or data.get("token")
+        if not token:
+            code = body.get("code")
+            message = body.get("message") or body.get("msg") or body.get("error")
+            detail = "QQ token response does not contain access_token"
+            if code is not None or message:
+                detail += " (code={}, message={})".format(code if code is not None else "unknown", str(message or "unknown")[:200])
+            raise RuntimeError(detail)
+        try:
+            expires_in = max(60, int(data.get("expires_in", data.get("expiresIn", 7200))))
+        except (TypeError, ValueError):
+            expires_in = 7200
+        return str(token), expires_in
+
     async def access_token(self, force: bool = False) -> str:
         async with self.lock:
             if self.token and not force and _now() < self.token_expires_at:
                 return self.token
             response = await self.client.post(
-                self.config.api_base_url + "/app/getAppAccessToken",
+                settings.token_api_base_url + "/app/getAppAccessToken",
                 json={"appId": self.config.app_id, "clientSecret": self.config.client_secret},
             )
             response.raise_for_status()
-            body = response.json()
-            data = body.get("data", body) if isinstance(body, dict) else {}
-            token = data.get("access_token")
-            if not token:
-                raise RuntimeError("QQ token response does not contain access_token")
-            expires_in = max(60, int(data.get("expires_in", 7200)))
+            token, expires_in = self._token_from_body(response.json())
             self.token = str(token)
             self.token_expires_at = _now() + expires_in - 300
             return self.token
@@ -355,10 +400,40 @@ class QQApiClient:
 settings = Settings()
 store: Optional[GatewayStore] = None
 background_tasks: Set[asyncio.Task] = set()
-scope_lock = asyncio.Lock()
+scope_locks: Dict[str, asyncio.Lock] = {}
+scope_locks_lock = asyncio.Lock()
 runtimes: Dict[str, "QQRuntime"] = {}
 runtime_lock = asyncio.Lock()
 app = FastAPI(title="QQ Agent Gateway", version="0.1.0")
+
+
+def identify_payload(token: str, intents: int) -> Dict[str, Any]:
+    return {
+        "op": OP_IDENTIFY,
+        "d": {
+            "token": token,
+            "intents": intents,
+            "shard": [0, 1],
+            "properties": {"$os": "linux", "$browser": "agentWorkCluster", "$device": "agentWorkCluster"},
+        },
+    }
+
+
+def resume_payload(token: str, session_id: str, sequence: int) -> Dict[str, Any]:
+    return {"op": OP_RESUME, "d": {"token": token, "session_id": session_id, "seq": sequence}}
+
+
+def heartbeat_payload(sequence: Optional[int]) -> Dict[str, Any]:
+    return {"op": OP_HEARTBEAT, "d": sequence}
+
+
+async def scope_lock_for(scope_key: str) -> asyncio.Lock:
+    async with scope_locks_lock:
+        lock = scope_locks.get(scope_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            scope_locks[scope_key] = lock
+        return lock
 
 
 def _signature(event_ts: str, plain_token: str, client_secret: Optional[str] = None) -> str:
@@ -390,8 +465,11 @@ def normalize_event(bot_id: str, payload: Dict[str, Any]) -> Optional[Normalized
         author = data.get("author") if isinstance(data.get("author"), dict) else {}
         sender_id = str(author.get("member_openid") or data.get("openid") or "")
     else:
-        scope_id = str(data.get("openid") or data.get("user_openid") or "")
-        sender_id = scope_id
+        author = data.get("author") if isinstance(data.get("author"), dict) else {}
+        # C2C_MESSAGE_CREATE places the user's openid under author.user_openid
+        # in the current QQ Gateway payload; retain older top-level aliases.
+        scope_id = str(author.get("user_openid") or data.get("openid") or data.get("user_openid") or "")
+        sender_id = str(author.get("user_openid") or scope_id)
     content = MENTION_RE.sub("", str(data.get("content") or "")).strip()
     if not scope_id or not content:
         return None
@@ -432,6 +510,8 @@ async def wait_for_run(run_id: str, config: QQConnectionConfig, event: Normalize
             )
             response.raise_for_status()
             body = response.json()
+            assert store is not None
+            store.touch_event(event.event_key)
             if body.get("state") in {"completed", "failed", "cancelled"}:
                 return body
             await asyncio.sleep(1.0)
@@ -445,31 +525,42 @@ async def process_event(event: NormalizedEvent, runtime: "QQRuntime") -> None:
     try:
         if _now() >= event_passive_deadline(event):
             store.expire_event(event.event_key, "QQ passive reply window expired before processing")
+            runtime.record_event("expired", event, reason="before_processing")
             return
-        async with scope_lock:
+        store.touch_event(event.event_key)
+        async with await scope_lock_for(scope_key):
             conversation_id = store.get_conversation(scope_key)
             result = await submit_to_agent(event, config, conversation_id)
             if not conversation_id and result.get("conversation_id"):
                 store.save_conversation(scope_key, result["conversation_id"], config.agent_id, config.owner_user_id)
         run_id = str(result["run_id"])
         store.mark_run(event.event_key, run_id)
+        runtime.record_event("agent_submitted", event, run_id=run_id)
         run = await wait_for_run(run_id, config, event)
+        runtime.record_event("run_completed", event, run_id=run_id, run_state=str(run.get("state") or "unknown"))
         if _now() >= event_passive_deadline(event):
             store.expire_event(event.event_key, "QQ passive reply window expired before reply")
+            runtime.record_event("expired", event, run_id=run_id, reason="before_reply")
             return
         content = str(run.get("final_content") or "").strip() or "抱歉，这次处理没有生成可发送的回复。"
-        if not store.claim_outbound(event.event_key):
+        outbound_claim = store.claim_outbound(event.event_key)
+        if outbound_claim == "sent":
             store.complete_event(event.event_key)
+            return
+        if outbound_claim == "inflight":
+            runtime.record_event("outbound_inflight", event, run_id=run_id)
             return
         try:
             message_id = await runtime.api.send_message(event, content)
             store.complete_outbound(event.event_key, message_id)
             store.complete_event(event.event_key)
+            runtime.record_event("reply_sent", event, run_id=run_id, message_id=message_id)
         except Exception as exc:
             store.fail_outbound(event.event_key, str(exc))
             raise
     except Exception as exc:
         store.fail_event(event.event_key, str(exc))
+        runtime.record_event("failed", event, error_type=type(exc).__name__)
 
 
 class QQRuntime:
@@ -480,6 +571,45 @@ class QQRuntime:
         self.api = QQApiClient(config)
         self.stop_event = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
+        # Keep the gateway session in memory so short reconnects can use Resume.
+        self.session_id = ""
+        self.sequence: Optional[int] = None
+        self.event_slots = asyncio.Semaphore(settings.max_event_tasks)
+        self.awaiting_heartbeat_ack = False
+        self.last_heartbeat_at = 0.0
+        self.last_heartbeat_ack_at = 0.0
+        self.reconnect_count = 0
+        self.resume_count = 0
+        self.dispatches_received = 0
+        self.events_received = 0
+        self.events_ignored = 0
+        self.events_scheduled = 0
+        self.events_claimed = 0
+        self.events_duplicates = 0
+        self.events_agent_submitted = 0
+        self.events_run_completed = 0
+        self.events_reply_sent = 0
+        self.events_failed = 0
+        self.events_expired = 0
+        self.last_dispatch_at = 0.0
+        self.last_opcode = 0
+        self.active_event_keys: Set[str] = set()
+
+    def record_event(self, stage: str, event: NormalizedEvent, **fields: Any) -> None:
+        metric_name = "events_" + stage
+        if hasattr(self, metric_name):
+            setattr(self, metric_name, getattr(self, metric_name) + 1)
+        payload = {
+            "stage": stage,
+            "agent_id": self.config.agent_id,
+            "bot_id": event.bot_id,
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "scope_type": event.scope_type,
+            "run_id": fields.pop("run_id", ""),
+            **fields,
+        }
+        event_logger.info("qq_event %s", json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run())
@@ -501,46 +631,105 @@ class QQRuntime:
                 store.set_connection_status(self.config.agent_id, "connecting")
                 url = await self.api.gateway_url()
                 async with websockets.connect(url, ping_interval=None, close_timeout=5, max_size=2 ** 20) as socket:
+                    protocol_close = False
                     hello = json.loads(await socket.recv())
+                    if not isinstance(hello, dict) or int(hello.get("op", -1)) != OP_HELLO:
+                        raise RuntimeError("QQ gateway did not send Hello opcode 10")
                     data = hello.get("d") if isinstance(hello, dict) else {}
+                    if not isinstance(data, dict) or not data.get("heartbeat_interval"):
+                        raise RuntimeError("QQ Hello does not contain heartbeat_interval")
                     interval = max(1.0, float(data.get("heartbeat_interval", 45000)) / 1000.0)
-                    await socket.send(json.dumps({
-                        "op": 2,
-                        "d": {"token": "QQBot " + await self.api.access_token(), "intents": self.config.intents, "shard": [0, 1]},
-                    }))
-                    sequence = None
-                    store.set_connection_status(self.config.agent_id, "connected")
+                    token = "QQBot " + await self.api.access_token()
+                    if self.session_id and self.sequence is not None:
+                        await socket.send(json.dumps(resume_payload(token, self.session_id, self.sequence)))
+                        self.resume_count += 1
+                    else:
+                        await socket.send(json.dumps(identify_payload(token, self.config.intents)))
+                    store.set_connection_status(self.config.agent_id, "connecting")
                     delay = 1.0
+                    heartbeat_at = _now() + interval
+                    self.awaiting_heartbeat_ack = False
                     while not self.stop_event.is_set():
                         try:
-                            raw = await asyncio.wait_for(socket.recv(), timeout=interval)
+                            raw = await asyncio.wait_for(socket.recv(), timeout=max(0.0, heartbeat_at - _now()))
                         except asyncio.TimeoutError:
-                            await socket.send(json.dumps({"op": 1, "d": sequence}))
+                            if self.awaiting_heartbeat_ack:
+                                raise RuntimeError("QQ heartbeat ACK timed out")
+                            await socket.send(json.dumps(heartbeat_payload(self.sequence)))
+                            self.awaiting_heartbeat_ack = True
+                            self.last_heartbeat_at = _now()
+                            heartbeat_at = _now() + interval
                             continue
                         if raw is None:
+                            protocol_close = True
                             break
                         payload = json.loads(raw)
                         op = int(payload.get("op", 0))
-                        if op == 0:
-                            sequence = payload.get("s", sequence)
+                        self.last_opcode = op
+                        if op == OP_DISPATCH:
+                            self.dispatches_received += 1
+                            self.last_dispatch_at = _now()
+                            if payload.get("s") is not None:
+                                self.sequence = int(payload["s"])
                             event_type = str(payload.get("t") or "")
                             event_data = payload.get("d") if isinstance(payload.get("d"), dict) else {}
                             if event_type == "READY":
+                                self.session_id = str(event_data.get("session_id") or self.session_id)
+                                store.set_connection_status(self.config.agent_id, "connected")
                                 user = event_data.get("user") if isinstance(event_data.get("user"), dict) else {}
                                 bot_id = str(user.get("id") or self.config.bot_id or self.config.app_id)
                                 if bot_id != self.config.bot_id:
                                     self.config.bot_id = bot_id
                                     store.set_connection_status(self.config.agent_id, "connected", bot_id=bot_id)
+                            elif event_type == "RESUMED":
+                                store.set_connection_status(self.config.agent_id, "connected")
                             event = normalize_event(self.config.bot_id or self.config.app_id, payload)
                             if event is not None:
-                                _schedule(event, self)
-                        elif op == 1:
-                            await socket.send(json.dumps({"op": 1, "d": sequence}))
-                        elif op in {7, 9}:
+                                assert store is not None
+                                if event.event_key in self.active_event_keys:
+                                    self.events_duplicates += 1
+                                    self.record_event("duplicate", event, reason="active")
+                                    continue
+                                claim = store.claim_event(event.event_key, event.payload())
+                                if claim == "claimed":
+                                    if _schedule(event, self):
+                                        self.events_claimed += 1
+                                        self.events_scheduled += 1
+                                        self.record_event("received", event)
+                                else:
+                                    self.events_duplicates += 1
+                                    self.record_event("duplicate", event)
+                            else:
+                                self.events_ignored += 1
+                        elif op == OP_HEARTBEAT:
+                            await socket.send(json.dumps(heartbeat_payload(self.sequence)))
+                            self.awaiting_heartbeat_ack = True
+                            self.last_heartbeat_at = _now()
+                            heartbeat_at = _now() + interval
+                        elif op == OP_HEARTBEAT_ACK:
+                            self.awaiting_heartbeat_ack = False
+                            self.last_heartbeat_ack_at = _now()
+                        elif op == OP_INVALID_SESSION:
+                            # Invalid Session includes a boolean indicating resumability.
+                            if payload.get("d") is not True:
+                                self.session_id = ""
+                                self.sequence = None
+                            protocol_close = True
                             break
+                        elif op == OP_RECONNECT:
+                            protocol_close = True
+                            break
+                    if protocol_close and not self.stop_event.is_set():
+                        self.reconnect_count += 1
+                        try:
+                            await asyncio.wait_for(self.stop_event.wait(), timeout=min(delay, 30.0))
+                        except asyncio.TimeoutError:
+                            pass
+                        delay = min(delay * 2, 30.0)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self.reconnect_count += 1
                 if store is not None:
                     store.set_connection_status(self.config.agent_id, "error", str(exc))
                 if not self.stop_event.is_set():
@@ -553,10 +742,22 @@ class QQRuntime:
             store.set_connection_status(self.config.agent_id, "disconnected")
 
 
-def _schedule(event: NormalizedEvent, runtime: "QQRuntime") -> None:
-    task = asyncio.create_task(process_event(event, runtime))
+async def _run_event(event: NormalizedEvent, runtime: "QQRuntime") -> None:
+    try:
+        async with runtime.event_slots:
+            await process_event(event, runtime)
+    finally:
+        runtime.active_event_keys.discard(event.event_key)
+
+
+def _schedule(event: NormalizedEvent, runtime: "QQRuntime") -> bool:
+    if event.event_key in runtime.active_event_keys:
+        return False
+    runtime.active_event_keys.add(event.event_key)
+    task = asyncio.create_task(_run_event(event, runtime))
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
+    return True
 
 
 async def retry_pending_events() -> None:
@@ -564,7 +765,7 @@ async def retry_pending_events() -> None:
     for item in store.pending_events():
         event = NormalizedEvent(**item["payload"])
         runtime = next((item for item in runtimes.values() if item.config.bot_id == event.bot_id or item.config.app_id == event.bot_id), None)
-        if runtime is not None and store.claim_event(event.event_key, event.payload()) == "claimed":
+        if runtime is not None and event.event_key not in runtime.active_event_keys and store.claim_event(event.event_key, event.payload()) == "claimed":
             _schedule(event, runtime)
 
 
@@ -640,7 +841,35 @@ async def shutdown() -> None:
 @app.get("/healthz")
 async def healthz() -> Dict[str, Any]:
     connected = sum(1 for runtime in runtimes.values() if (store and (store.connection_status(runtime.config.agent_id) or {}).get("status") == "connected"))
-    return {"status": "ok", "configured": bool(runtimes), "connections": len(runtimes), "connected": connected}
+    return {
+        "status": "ok", "configured": bool(runtimes), "connections": len(runtimes), "connected": connected,
+        "connection_details": [
+            {
+                "agent_id": runtime.config.agent_id,
+                "status": (store.connection_status(runtime.config.agent_id) or {}).get("status", "unknown") if store else "unknown",
+                "bot_id": runtime.config.bot_id,
+                "session_active": bool(runtime.session_id),
+                "sequence": runtime.sequence,
+                "reconnects": runtime.reconnect_count,
+                "resumes": runtime.resume_count,
+                "heartbeat_ack_pending": runtime.awaiting_heartbeat_ack,
+                "last_opcode": runtime.last_opcode,
+                "last_dispatch_at": runtime.last_dispatch_at,
+                "dispatches_received": runtime.dispatches_received,
+                "events_received": runtime.events_received,
+                "events_ignored": runtime.events_ignored,
+                "events_claimed": runtime.events_claimed,
+                "events_duplicates": runtime.events_duplicates,
+                "events_scheduled": runtime.events_scheduled,
+                "events_agent_submitted": runtime.events_agent_submitted,
+                "events_run_completed": runtime.events_run_completed,
+                "events_reply_sent": runtime.events_reply_sent,
+                "events_failed": runtime.events_failed,
+                "events_expired": runtime.events_expired,
+            }
+            for runtime in runtimes.values()
+        ],
+    }
 
 
 async def require_service(authorization: Optional[str]) -> None:
@@ -675,7 +904,7 @@ async def connect_connection(request: Request, authorization: Optional[str] = He
     if not agent_id or not app_id or not client_secret or not isinstance(owner_user_id, int) or owner_user_id < 1:
         raise HTTPException(status_code=422, detail="QQ 连接配置缺少 agent_id、owner_user_id、app_id 或 client_secret")
     intents = int(payload.get("intents", settings.intents))
-    if not 1 <= intents <= 4095:
+    if not 1 <= intents <= MAX_QQ_INTENTS:
         raise HTTPException(status_code=422, detail="QQ intents 无效")
     config = QQConnectionConfig(
         agent_id=agent_id, owner_user_id=owner_user_id, app_id=app_id, client_secret=client_secret,
@@ -694,33 +923,9 @@ async def disconnect_connection(agent_id: str, authorization: Optional[str] = He
 
 @app.post("/qq/webhook/{bot_id}")
 async def webhook(bot_id: str, request: Request) -> JSONResponse:
-    runtime = runtime_for_bot(bot_id)
-    if runtime is None:
-        raise HTTPException(status_code=404, detail="QQ bot 未找到")
-    try:
-        payload = json.loads((await request.body()).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="无效的 QQ 事件 JSON") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="QQ 事件必须是对象")
-    if int(payload.get("op", 0)) == 13:
-        data = payload.get("d") if isinstance(payload.get("d"), dict) else payload
-        plain_token, event_ts = str(data.get("plain_token", "")), str(data.get("event_ts", ""))
-        if not plain_token or not event_ts:
-            raise HTTPException(status_code=400, detail="QQ 验证事件缺少字段")
-        return JSONResponse({"plain_token": plain_token, "signature": _signature(event_ts, plain_token, runtime.config.client_secret)})
-    event = normalize_event(bot_id, payload)
-    if event is None:
-        return JSONResponse({"accepted": False, "reason": "unsupported_or_empty_event"}, status_code=202)
-    assert store is not None
-    if store.claim_event(event.event_key, event.payload()) == "claimed":
-        _schedule(event, runtime)
-    return JSONResponse({"accepted": True, "event_id": event.event_id}, status_code=202)
+    raise HTTPException(status_code=410, detail="QQ Gateway 已切换为 WebSocket-only，不再支持 Webhook")
 
 
 @app.post("/qq/webhook")
 async def webhook_default(request: Request) -> JSONResponse:
-    bot_id = settings.bot_id or settings.app_id
-    if not bot_id:
-        raise HTTPException(status_code=404, detail="QQ bot 未找到")
-    return await webhook(bot_id, request)
+    raise HTTPException(status_code=410, detail="QQ Gateway 已切换为 WebSocket-only，不再支持 Webhook")

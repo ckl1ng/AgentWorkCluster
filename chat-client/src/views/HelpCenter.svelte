@@ -72,13 +72,11 @@
         <ol><li>在 QQ 开放平台创建机器人应用，取得 AppID 和 AppSecret，并确认当前官方文档要求的事件订阅权限。</li><li>在部署机器的 <code>chat-server/.agent.env</code> 只配置服务端密钥；不要把 AppSecret 写入文件。</li><li>将 <code>QQ_GATEWAY_ENABLED</code> 设为 <code>true</code> 启动 Gateway，然后在目标 Agent 的“配置 → QQ Bot 连接”中填写 AppID/AppSecret。</li></ol>
         <pre><code>QQ_GATEWAY_ENABLED=true
 ## AppID/AppSecret 在网页 Agent 设置中填写，不放入环境文件
-QQ_GATEWAY_MASTER_KEY=your-fernet-key
-QQ_WEBHOOK_SIGNATURE_MODE=ed25519</code></pre>
+QQ_GATEWAY_MASTER_KEY=your-fernet-key</code></pre>
         <p>使用以下命令生成 <code>QQ_GATEWAY_MASTER_KEY</code>，并将生成值仅保存到部署环境：<code>python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'</code>。</p>
 
-        <h4>配置 QQ 平台回调</h4>
-        <p>生产环境需要将公网 HTTPS 地址配置为 <code>https://your-domain/qq/webhook/your-qq-bot-id</code>。Caddy 已将 <code>/qq/webhook*</code> 反向代理到根目录的 Gateway；不要把内部 Agent API 的 <code>9011</code> 端口暴露给 QQ 或公网。</p>
-        <p>在 QQ 平台订阅群聊 @ 消息和私聊消息事件。平台发送验证挑战时，Gateway 会返回所需的挑战响应。正式发布前，以 QQ 官方当前文档核对 API 域名、事件字段、Intents 与签名算法。</p>
+        <h4>QQ 接入方式</h4>
+        <p>网页一键连接仅使用 WebSocket；不需要配置回调地址，也不需要向公网暴露 <code>/qq/webhook*</code>。事件 Intents 默认使用 <code>33554432</code>（<code>GROUP_AND_C2C_EVENT</code>），用于接收群聊 @ 和私聊消息。</p>
 
         <h4>启动与验证</h4>
         <pre><code>cd /home/zhouzw/AgentWorkCluster

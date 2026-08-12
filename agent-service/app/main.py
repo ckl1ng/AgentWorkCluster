@@ -3090,7 +3090,8 @@ class QQConnectPayload(BaseModel):
     app_id: str = Field(min_length=1, max_length=128)
     client_secret: str = Field(min_length=1, max_length=256)
     bot_id: Optional[str] = Field(default=None, max_length=128)
-    intents: int = Field(default=513, ge=1, le=4095)
+    # GROUP_AND_C2C_EVENT (1 << 25) receives both C2C and group @ messages.
+    intents: int = Field(default=1 << 25, ge=1, le=(1 << 31) - 1)
 
 
 class LocalDevicePayload(BaseModel):
