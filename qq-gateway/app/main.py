@@ -9,6 +9,7 @@ import re
 import secrets
 import sqlite3
 import time
+from urllib.parse import urlparse
 from dataclasses import asdict, dataclass
 from threading import RLock
 from typing import Any, Dict, List, Optional, Set
@@ -334,7 +335,9 @@ class QQApiClient:
     async def gateway_url(self) -> str:
         token = await self.access_token()
         response = await self.client.get(
-            self.config.api_base_url + "/websocket/",
+            # /websocket/ is the returned WebSocket upgrade endpoint, not an
+            # HTTP discovery endpoint. Fetch the WSS URL from /gateway first.
+            self.config.api_base_url + "/gateway",
             headers={"Authorization": "QQBot " + token},
         )
         response.raise_for_status()
@@ -343,7 +346,10 @@ class QQApiClient:
         url = data.get("url") or data.get("websocket_url")
         if not url:
             raise RuntimeError("QQ websocket response does not contain url")
-        return str(url)
+        url = str(url)
+        if urlparse(url).scheme not in {"ws", "wss"}:
+            raise RuntimeError("QQ gateway response must contain a ws:// or wss:// URL")
+        return url
 
 
 settings = Settings()

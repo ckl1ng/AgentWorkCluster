@@ -19,7 +19,7 @@ python3 -m pip install -r requirements.txt
 
 1. 启动 Agent API、QQ Gateway 和前端，并在网页打开目标 Agent 的“配置”。
 2. 在基础配置的“QQ Bot 连接”区域填写 QQ 开放平台的 AppID、AppSecret；Bot ID 可留空，连接成功后从 READY 事件自动识别。
-3. 点击“一键连接 QQ Bot”。Gateway 会调用 `/app/getAppAccessToken` 获取临时凭证，再连接 `/websocket/` 返回的网关地址，发送 Identify（默认 Intents 为 513），收到 `GROUP_AT_MESSAGE_CREATE` 或 `C2C_MESSAGE_CREATE` 后自动转给当前 Agent。
+3. 点击“一键连接 QQ Bot”。Gateway 会调用 `/app/getAppAccessToken` 获取临时凭证，再调用 `/gateway` 获取 `wss://` 网关地址并建立 WebSocket 连接，发送 Identify（默认 Intents 为 513），收到 `GROUP_AT_MESSAGE_CREATE` 或 `C2C_MESSAGE_CREATE` 后自动转给当前 Agent。
 4. Gateway 在自己的加密数据库中保存凭证，进程重启后自动恢复连接；浏览器不会保存 AppSecret。点击“断开连接”会删除 Gateway 中的连接配置。
 
 QQ Gateway 仍需要 `AGENT_SERVICE_SECRET` 和 `QQ_GATEWAY_MASTER_KEY` 作为服务间认证及凭证加密密钥。AppID、AppSecret、Agent ID 和 owner ID 不再需要写入 `.env`。Docker Compose 中 Agent API 使用 `QQ_GATEWAY_INTERNAL_URL=http://qq-gateway:9013` 访问 Gateway。
