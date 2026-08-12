@@ -12,6 +12,7 @@
   const dispatch = createEventDispatcher();
   let agent = null;
   let conversation = null;
+  let conversations = [];
   let messageList = [];
   let traces = {};
   let input = '';
@@ -34,8 +35,9 @@
     try {
       agent = await api.getAgent(agentId);
       await loadLocalDevice();
-      const conversations = await api.listAgentConversations(agentId);
+      conversations = (await api.listAgentConversations(agentId)).filter(item => !item.channel_provider);
       conversation = conversations[0] || await api.createAgentConversation(agentId);
+      if (!conversations.some(item => item.id === conversation.id)) conversations = [conversation, ...conversations];
       await loadConversation();
     } catch (e) { error = e.message || '无法加载 Agent'; }
     finally { loading = false; }
@@ -200,6 +202,7 @@
     if (runningRunId) return;
     try {
       conversation = await api.createAgentConversation(agentId);
+      conversations = [conversation, ...conversations];
       messageList = [];
       traces = {};
       error = '';
@@ -207,6 +210,17 @@
       scrollBottom();
     }
     catch (e) { error = e.message || '无法创建会话'; }
+  }
+
+  async function selectConversation(next) {
+    if (next.id === conversation?.id || runningRunId) return;
+    socket?.disconnect();
+    conversation = next;
+    messageList = [];
+    traces = {};
+    confirmation = null;
+    error = '';
+    await loadConversation();
   }
 
   async function cancelRun() {
@@ -292,15 +306,24 @@
 {#if runsOpen}
   <AgentRuns {agentId} on:close={() => runsOpen = false} />
 {:else if settingsOpen}
-  <AgentSettings {agent} on:saved={settingsSaved} on:updated={syncAgent} on:cancel={() => settingsOpen = false} />
+  <AgentSettings {agent} conversationId={conversation?.id || ''} on:saved={settingsSaved} on:updated={syncAgent} on:cancel={() => settingsOpen = false} />
 {:else}
 <section class="agent-chat">
+  <aside class="conversation-sidebar" aria-label="Agent 会话">
+    <div class="conversation-sidebar-heading"><span>会话</span><button type="button" title="新建会话" aria-label="新建会话" on:click={newConversation} disabled={!!runningRunId}>＋</button></div>
+    <div class="conversation-items">
+      {#each conversations as item (item.id)}
+        <button class:active={item.id === conversation?.id} type="button" on:click={() => selectConversation(item)} disabled={!!runningRunId} title={item.title}>{item.title || '新会话'}</button>
+      {/each}
+    </div>
+  </aside>
+  <div class="conversation-main">
   <div class="agent-toolbar">
     <div class="agent-avatar" aria-hidden="true">{#if agent?.avatar_url}<img src={agent.avatar_url} alt="" />{:else}<span>{(agent?.name || 'A').slice(0, 1).toUpperCase()}</span>{/if}</div>
     <span class="state" class:paused={agent?.state !== 'active'}>{agent?.state === 'active' ? '可运行' : '已暂停'}</span>
     {#if agent?.execution_target === 'local'}<span class="local-state" class:offline={localDevice?.status !== 'online'} title={localDevice ? `${localDevice.display_name} · ${localDevice.status}` : '绑定设备不可用'}>{localDevice?.status === 'online' ? '本机在线' : '等待本机'}</span>{/if}
     <span class="agent-purpose">{agent?.description || '个人 Agent'}</span>
-    <div class="toolbar-actions"><button type="button" title="新建会话" aria-label="新建会话" on:click={newConversation} disabled={!!runningRunId}>＋</button><button type="button" title="清空当前上下文" on:click={clearContext} disabled={!!runningRunId}>清空上下文</button><button type="button" on:click={() => runsOpen = true}>运行记录</button>{#if agent?.is_owner}<button type="button" on:click={() => settingsOpen = true} disabled={!!runningRunId}>配置</button><button class="delete" type="button" title="删除 Agent" on:click={deleteAgent} disabled={!!runningRunId}>删除</button>{/if}</div>
+    <div class="toolbar-actions"><button type="button" title="清空当前上下文" on:click={clearContext} disabled={!!runningRunId}>清空上下文</button><button type="button" on:click={() => runsOpen = true}>运行记录</button>{#if agent?.is_owner}<button type="button" on:click={() => settingsOpen = true} disabled={!!runningRunId}>配置</button><button class="delete" type="button" title="删除 Agent" on:click={deleteAgent} disabled={!!runningRunId}>删除</button>{/if}</div>
   </div>
   <div class="messages" bind:this={messageListEl}>
     {#if loading}<p class="status">正在加载 Agent...</p>
@@ -351,11 +374,13 @@
   {#if confirmation}<ToolConfirmation {confirmation} busy={confirmationBusy} on:decide={decideConfirmation} />{/if}
   {#if error && messageList.length}<p class="run-error" role="status">{error}</p>{/if}
   <div class="composer"><textarea bind:value={input} rows="2" placeholder={runningRunId ? 'Agent 正在运行...' : '输入任务...'} disabled={!!runningRunId || agent?.state !== 'active'} on:keydown={keydown}></textarea>{#if runningRunId}<button class="cancel" type="button" on:click={cancelRun}>停止</button>{:else}<button type="button" on:click={send} disabled={!input.trim() || agent?.state !== 'active'}>发送</button>{/if}</div>
+  </div>
 </section>
 {/if}
 
 <style>
-  .agent-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .agent-chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
+  .conversation-sidebar { display:flex; flex:0 0 178px; min-width:0; flex-direction:column; border-right:1px solid var(--color-border); background:var(--color-surface); }.conversation-sidebar-heading { display:flex; min-height:44px; align-items:center; justify-content:space-between; padding:0 10px 0 14px; border-bottom:1px solid var(--color-border); color:var(--color-text-muted); font-size:12px; font-weight:700; }.conversation-sidebar-heading button { display:grid; width:26px; height:26px; place-items:center; min-height:0; padding:0; font-size:17px; }.conversation-items { display:grid; gap:2px; overflow:auto; padding:7px; }.conversation-items button { width:100%; overflow:hidden; margin:0; padding:7px 8px; border-color:transparent; color:var(--color-text-muted); text-align:left; text-overflow:ellipsis; white-space:nowrap; }.conversation-items button.active { border-color:var(--color-primary); background:var(--color-active); color:var(--color-primary); }.conversation-main { display:flex; flex:1; min-width:0; flex-direction:column; }
   .agent-toolbar { display: flex; align-items: center; min-height: 44px; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }.agent-avatar, .message-avatar { display: grid; width: 32px; height: 32px; place-items: center; flex: 0 0 32px; overflow: hidden; border: 1px solid var(--color-border); border-radius: 50%; background: var(--color-avatar); color: var(--color-avatar-text); font-size: 12px; font-weight: 700; }.agent-avatar img, .message-avatar img { width: 100%; height: 100%; object-fit: cover; }.message-avatar.user { background: var(--color-group-avatar); color: var(--color-group-avatar-text); }
   .state,.local-state { padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--color-online) 55%, var(--color-border)); border-radius: 4px; color: var(--color-online); font-size: 11px; font-weight: 700; }.state.paused,.local-state.offline { color: var(--color-error); border-color: var(--color-error); }
   .agent-purpose { overflow: hidden; flex: 1; color: var(--color-text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.toolbar-actions { display: flex; gap: 6px; }.toolbar-actions .delete { color: var(--color-error); }
@@ -364,5 +389,5 @@
   .message-row { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 12px; padding: 0 max(16px, 7vw); }.message-row.user { flex-direction: row-reverse; }.message { max-width: min(780px, 78%); padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); border-radius: 8px; border-top-left-radius: 2px; background: var(--color-other-msg); }.message.user { border-color: color-mix(in srgb, var(--color-primary) 35%, transparent); border-top-left-radius: 8px; border-top-right-radius: 2px; background: var(--color-self-msg); }.message-meta { margin-bottom: 5px; color: var(--color-primary); font-size: 11px; font-weight: 600; }.message.user .message-meta { color: var(--color-text-muted); }.message-meta span { color: var(--color-primary); font-weight: 400; }.content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; font-size: 14px; }
   .run-process { margin: 8px 0 10px; border: 1px solid color-mix(in srgb, var(--color-primary) 22%, var(--color-border)); border-radius: 6px; background: color-mix(in srgb, var(--color-input) 78%, transparent); overflow: hidden; }.run-process > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: var(--color-primary); cursor: pointer; list-style-position: inside; user-select: none; }.process-title { font-size: 12px; font-weight: 700; }.process-count { margin-left: auto; color: var(--color-text-muted); font-size: 10px; }.run-meta { display:flex; flex-wrap:wrap; gap:5px; padding: 0 10px 7px; }.run-meta span { padding:2px 5px; border:1px solid var(--color-border); border-radius:3px; color:var(--color-text-muted); font-size:10px; }.trace-steps { display: grid; gap: 5px; padding: 0 7px 8px; }.trace-step { border-left: 2px solid var(--color-border); color: var(--color-text-muted); font-size: 12px; line-height: 1.55; }.trace-step > summary { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; list-style: none; user-select: none; }.trace-step > summary::-webkit-details-marker, .run-process > summary::-webkit-details-marker { display: none; }.trace-step > summary::before, .run-process > summary::before { content: '›'; color: var(--color-text-muted); font-size: 16px; transition: transform .15s ease; }.trace-step[open] > summary::before, .run-process[open] > summary::before { transform: rotate(90deg); }.step-icon { display: inline-grid; width: 19px; height: 19px; place-items: center; border-radius: 4px; background: color-mix(in srgb, var(--color-primary) 17%, var(--color-input)); color: var(--color-primary); font-size: 10px; font-weight: 700; }.trace-step > div { max-height: 260px; overflow: auto; padding: 0 9px 8px 33px; white-space: pre-wrap; overflow-wrap: anywhere; }.trace-step.thought { border-left-color: var(--color-primary); }.trace-step.dialogue { display: flex; gap: 7px; padding: 6px 8px; }.trace-step.dialogue > div { max-height: none; padding: 0; }.trace-step.tool { border-left-color: color-mix(in srgb, var(--color-online) 65%, var(--color-border)); }.tool-name { color: var(--color-text); font-weight: 600; }.tool-type { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-muted); font-size: 10px; }.tool-status { margin-left: auto; color: var(--color-online); font-size: 10px; }.tool-waiting { color: var(--color-warning, #d99b36); }.tool-detail { padding-bottom: 8px !important; }.tool-label { margin: 4px 0 3px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; }.tool-detail pre { max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg); color: var(--color-text); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }.tool-summary, .tool-result { margin-top: 5px; color: var(--color-text-muted); font-size: 11px; }.trace-empty { padding: 0 10px 9px; color: var(--color-text-muted); font-size: 11px; }.final-result { padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent); }.result-label { margin-bottom: 4px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
   .run-error { padding: 0 16px 8px; font-size: 12px; }.composer { display: flex; flex-shrink: 0; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--color-border); background: var(--color-surface); }.composer textarea { flex: 1; min-width: 0; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; padding: 9px 10px; resize: none; outline: none; }.composer textarea:focus { border-color: var(--color-primary); }.composer > button { align-self: end; min-width: 54px; border-color: var(--color-primary); background: var(--color-primary); color: #fff; font-weight: 700; }.composer > button.cancel { border-color: var(--color-error); background: transparent; color: var(--color-error); }
-  @media (max-width: 600px) { .agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
+  @media (max-width: 600px) { .conversation-sidebar { flex-basis:112px; }.conversation-sidebar-heading { padding:0 7px; }.conversation-items { padding:5px; }.conversation-items button { padding:7px 5px; font-size:11px; }.agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
 </style>

@@ -3,6 +3,7 @@
   import { api } from '../lib/api.js';
 
   export let agent;
+  export let conversationId = '';
   const dispatch = createEventDispatcher();
   let error = '';
   let loading = true;
@@ -18,7 +19,7 @@
   let mcp = { url: '', headers: '{}' };
   let candidates = [];
   let candidateSource = '';
-  let memory = { content: '', kind: 'fact', importance: 50 };
+  let memory = { content: '', kind: 'fact', importance: 50, scope_type: 'conversation' };
 
   onMount(load);
 
@@ -188,9 +189,11 @@
   async function addMemory() {
     error = '';
     try {
-      const created = await api.createMemory(agent.id, { content: memory.content.trim(), kind: memory.kind, importance: Number(memory.importance) });
+      const payload = { content: memory.content.trim(), kind: memory.kind, importance: Number(memory.importance), scope_type: memory.scope_type };
+      if (memory.scope_type === 'conversation') payload.scope_id = conversationId;
+      const created = await api.createMemory(agent.id, payload);
       memories = [created, ...memories];
-      memory = { content: '', kind: 'fact', importance: 50 };
+      memory = { content: '', kind: 'fact', importance: 50, scope_type: 'conversation' };
     } catch (e) { error = e.message || '无法保存记忆'; }
   }
 
@@ -237,9 +240,9 @@
   </section>
 
   <section>
-    <div class="heading"><div><h3>长期记忆</h3><p>仅保存明确创建的事实；冲突不会自动覆盖。</p></div><button type="button" class:enabled={agent.memory_enabled} on:click={toggleMemory} disabled={savingMemory}>{agent.memory_enabled ? '已启用' : '默认关闭'}</button></div>
-    {#if agent.memory_enabled}<div class="grid three"><label>类型<select bind:value={memory.kind}><option value="fact">事实</option><option value="preference">偏好</option><option value="profile">档案</option><option value="constraint">约束</option><option value="experience">经验</option></select></label><label>重要度<input type="number" min="0" max="100" bind:value={memory.importance} /></label><label>记忆内容<input bind:value={memory.content} /></label></div><button type="button" on:click={addMemory} disabled={!memory.content.trim()}>保存记忆</button>{/if}
-    <div class="memory-list">{#each memories as item (item.id)}<article class:conflict={item.conflict_state === 'conflicted'}><div><strong>{item.kind}</strong><p>{item.content}</p><small>{item.conflict_state} · 重要度 {item.importance} · 使用 {item.access_count} 次</small></div><button type="button" class="danger" on:click={() => deleteMemory(item.id)}>删除</button></article>{:else}<p class="muted">没有已保存记忆</p>{/each}</div>
+    <div class="heading"><div><h3>长期记忆</h3><p>默认仅在当前会话使用；选择 Agent 全局后才会跨会话共享。</p></div><button type="button" class:enabled={agent.memory_enabled} on:click={toggleMemory} disabled={savingMemory}>{agent.memory_enabled ? '已启用' : '默认关闭'}</button></div>
+    {#if agent.memory_enabled}<div class="grid three"><label>类型<select bind:value={memory.kind}><option value="fact">事实</option><option value="preference">偏好</option><option value="profile">档案</option><option value="constraint">约束</option><option value="experience">经验</option></select></label><label>范围<select bind:value={memory.scope_type}><option value="conversation" disabled={!conversationId}>当前会话</option><option value="agent">Agent 全局</option></select></label><label>重要度<input type="number" min="0" max="100" bind:value={memory.importance} /></label></div><label>记忆内容<input bind:value={memory.content} /></label><button type="button" on:click={addMemory} disabled={!memory.content.trim() || (memory.scope_type === 'conversation' && !conversationId)}>保存记忆</button>{/if}
+    <div class="memory-list">{#each memories as item (item.id)}<article class:conflict={item.conflict_state === 'conflicted'}><div><strong>{item.kind}</strong><p>{item.content}</p><small>{item.scope_type === 'conversation' ? '当前会话' : item.scope_type === 'qq_user' ? 'QQ 用户' : item.scope_type === 'qq_group' ? 'QQ 群' : 'Agent 全局'} · {item.conflict_state} · 重要度 {item.importance} · 使用 {item.access_count} 次</small></div><button type="button" class="danger" on:click={() => deleteMemory(item.id)}>删除</button></article>{:else}<p class="muted">没有已保存记忆</p>{/each}</div>
   </section>
   {#if error}<p class="error" role="status">{error}</p>{/if}
 </section>

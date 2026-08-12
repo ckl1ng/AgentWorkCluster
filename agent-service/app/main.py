@@ -247,6 +247,7 @@ class AgentStore:
                 CREATE TABLE IF NOT EXISTS conversations (
                   id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL,
                   title TEXT NOT NULL, context_epoch INTEGER NOT NULL DEFAULT 0,
+                  channel_provider TEXT NOT NULL DEFAULT '', channel_scope_type TEXT NOT NULL DEFAULT '', channel_scope_id TEXT NOT NULL DEFAULT '',
                   deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS messages (
@@ -297,6 +298,7 @@ class AgentStore:
                   id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL, agent_id TEXT NOT NULL,
                   content_encrypted BLOB NOT NULL, embedding TEXT NOT NULL, expires_at TEXT,
                   source_message_id TEXT, scope TEXT NOT NULL DEFAULT 'agent', kind TEXT NOT NULL DEFAULT 'fact',
+                  scope_type TEXT NOT NULL DEFAULT 'agent', scope_id TEXT NOT NULL DEFAULT '',
                   source_confidence TEXT NOT NULL DEFAULT 'user', importance INTEGER NOT NULL DEFAULT 50,
                   access_count INTEGER NOT NULL DEFAULT 0, conflict_state TEXT NOT NULL DEFAULT 'active',
                   last_accessed_at TEXT, created_at TEXT NOT NULL
@@ -428,6 +430,11 @@ class AgentStore:
             self._ensure_column("agents", "run_policy", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column("agents", "memory_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("agents", "memory_retention_days", "INTEGER NOT NULL DEFAULT 30")
+            self._ensure_column("memory_items", "scope_type", "TEXT NOT NULL DEFAULT 'agent'")
+            self._ensure_column("memory_items", "scope_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("conversations", "channel_provider", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("conversations", "channel_scope_type", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("conversations", "channel_scope_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("agents", "execution_target", "TEXT NOT NULL DEFAULT 'cloud'")
             self._ensure_column("agents", "default_device_id", "TEXT")
             self._ensure_column("agents", "default_workspace_id", "TEXT")
@@ -1114,7 +1121,7 @@ class AgentStore:
             self._append_task_dispatch(parent_task_id, "task.assigned", "已创建并委派子任务", "agent", principal["id"], {"child_task_id": task_id})
             conversation_id = str(uuid.uuid4())
             self.db.execute(
-                "INSERT INTO conversations VALUES (?, ?, ?, ?, 0, NULL, ?, ?)",
+                "INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, '', '', '', NULL, ?, ?)",
                 (conversation_id, target_agent_id, owner_id, record["title"], timestamp, timestamp),
             )
             self.db.execute("UPDATE tasks SET conversation_id = ? WHERE id = ?", (conversation_id, task_id))
@@ -1220,7 +1227,7 @@ class AgentStore:
                 )
                 conversation_id = str(uuid.uuid4())
                 self.db.execute(
-                    """INSERT INTO conversations VALUES (?, ?, ?, ?, 0, NULL, ?, ?)""",
+                    """INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, '', '', '', NULL, ?, ?)""",
                     (conversation_id, assigned_agent_id, owner_id, record["title"], timestamp, timestamp),
                 )
                 self.db.execute("UPDATE tasks SET conversation_id = ? WHERE id = ?", (conversation_id, task_id))
@@ -1261,7 +1268,7 @@ class AgentStore:
             timestamp = now()
             conversation_id = str(uuid.uuid4())
             self.db.execute(
-                "INSERT INTO conversations VALUES (?, ?, ?, ?, 0, NULL, ?, ?)",
+                "INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, '', '', '', NULL, ?, ?)",
                 (conversation_id, agent_id, owner_id, task["title"], timestamp, timestamp),
             )
             state_version = int(task["state_version"]) + (0 if task["state"] == "assigned" else 1)
@@ -1312,7 +1319,7 @@ class AgentStore:
             timestamp = now()
             conversation_id = str(uuid.uuid4())
             self.db.execute(
-                "INSERT INTO conversations VALUES (?, ?, ?, ?, 0, NULL, ?, ?)",
+                "INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, '', '', '', NULL, ?, ?)",
                 (conversation_id, agent_id, owner_id, task["title"], timestamp, timestamp),
             )
             state_version = int(task["state_version"]) + 1
@@ -2518,11 +2525,12 @@ All state-changing operations require structured, authorized tools and are check
         conversation = {
             "id": conversation_id, "agent_id": agent_id, "owner_user_id": owner_id,
             "title": title[:120] or "新会话", "context_epoch": 0,
+            "channel_provider": "", "channel_scope_type": "", "channel_scope_id": "",
             "deleted_at": None, "created_at": timestamp, "updated_at": timestamp,
         }
         with self.lock:
             self.db.execute(
-                "INSERT INTO conversations VALUES (:id, :agent_id, :owner_user_id, :title, :context_epoch, :deleted_at, :created_at, :updated_at)",
+                "INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (:id, :agent_id, :owner_user_id, :title, :context_epoch, :channel_provider, :channel_scope_type, :channel_scope_id, :deleted_at, :created_at, :updated_at)",
                 conversation,
             )
             self.db.commit()
@@ -2534,6 +2542,16 @@ All state-changing operations require structured, authorized tools and are check
                 "SELECT * FROM conversations WHERE agent_id = ? AND owner_user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
                 (agent_id, owner_id),
             ).fetchall()]
+
+    def set_conversation_channel(self, conversation_id: str, owner_id: int, provider: str,
+                                 scope_type: str, scope_id: str) -> bool:
+        with self.lock:
+            changed = self.db.execute(
+                "UPDATE conversations SET channel_provider = ?, channel_scope_type = ?, channel_scope_id = ? WHERE id = ? AND owner_user_id = ?",
+                (provider, scope_type, scope_id, conversation_id, owner_id),
+            ).rowcount
+            self.db.commit()
+        return changed == 1
 
     def get_conversation(self, conversation_id: str, owner_id: int) -> Optional[Dict[str, Any]]:
         with self.lock:
@@ -2699,7 +2717,8 @@ All state-changing operations require structured, authorized tools and are check
     def get_run_context(self, run_id: str) -> Optional[Dict[str, Any]]:
         with self.lock:
             row = self.db.execute(
-                """SELECT runs.*, agents.*, conversations.context_epoch FROM runs
+                """SELECT runs.*, agents.*, conversations.context_epoch,
+                   conversations.channel_provider, conversations.channel_scope_type, conversations.channel_scope_id FROM runs
                    JOIN agents ON agents.id = runs.agent_id
                    JOIN conversations ON conversations.id = runs.conversation_id WHERE runs.id = ?""",
                 (run_id,),
@@ -2797,13 +2816,20 @@ All state-changing operations require structured, authorized tools and are check
             raise ValueError("长期记忆尚未为此 Agent 授权")
         content = str(data["content"]).strip()
         kind = str(data.get("kind", "fact"))
+        scope_type = str(data.get("scope_type", "agent"))
+        scope_id = str(data.get("scope_id", ""))
+        if scope_type not in {"agent", "conversation", "qq_user", "qq_group"}:
+            raise ValueError("记忆作用域无效")
+        if scope_type != "agent" and not scope_id:
+            raise ValueError("非全局记忆必须提供作用域 ID")
         if kind not in {"preference", "profile", "constraint", "fact", "experience"}:
             raise ValueError("记忆类型无效")
         record = {
             "id": str(uuid.uuid4()), "owner_user_id": owner_id, "agent_id": agent_id,
             "content_encrypted": self._encrypt_text(content), "embedding": "[]",
             "expires_at": data.get("expires_at") or now_offset(int(agent.get("memory_retention_days", 30))),
-            "source_message_id": data.get("source_message_id"), "scope": "agent", "kind": kind,
+            "source_message_id": data.get("source_message_id"), "scope": scope_type, "kind": kind,
+            "scope_type": scope_type, "scope_id": scope_id,
             "source_confidence": "user", "importance": int(data.get("importance", 50)),
             "access_count": 0, "conflict_state": "active", "last_accessed_at": None, "created_at": now(),
         }
@@ -2813,19 +2839,19 @@ All state-changing operations require structured, authorized tools and are check
             # Do not silently overwrite conflicting facts. A same-kind exact duplicate is rejected;
             # a same-kind different value remains visible as conflicted until the user removes one.
             active = self.db.execute(
-                "SELECT id, content_encrypted FROM memory_items WHERE agent_id = ? AND kind = ? AND conflict_state = 'active'", (agent_id, kind)
+                "SELECT id, content_encrypted FROM memory_items WHERE agent_id = ? AND kind = ? AND scope_type = ? AND scope_id = ? AND conflict_state = 'active'", (agent_id, kind, scope_type, scope_id)
             ).fetchall()
             for item in active:
                 if self._decrypt_text(item["content_encrypted"]).casefold() == content.casefold():
                     raise ValueError("相同记忆已存在")
             if kind in {"preference", "profile", "constraint"} and active:
-                self.db.execute("UPDATE memory_items SET conflict_state = 'conflicted' WHERE agent_id = ? AND kind = ? AND conflict_state = 'active'", (agent_id, kind))
+                self.db.execute("UPDATE memory_items SET conflict_state = 'conflicted' WHERE agent_id = ? AND kind = ? AND scope_type = ? AND scope_id = ? AND conflict_state = 'active'", (agent_id, kind, scope_type, scope_id))
                 record["conflict_state"] = "conflicted"
             self.db.execute(
                 """INSERT INTO memory_items (id, owner_user_id, agent_id, content_encrypted, embedding, expires_at,
-                   source_message_id, scope, kind, source_confidence, importance, access_count, conflict_state,
+                   source_message_id, scope, kind, scope_type, scope_id, source_confidence, importance, access_count, conflict_state,
                    last_accessed_at, created_at) VALUES (:id, :owner_user_id, :agent_id, :content_encrypted, :embedding,
-                   :expires_at, :source_message_id, :scope, :kind, :source_confidence, :importance, :access_count,
+                   :expires_at, :source_message_id, :scope, :kind, :scope_type, :scope_id, :source_confidence, :importance, :access_count,
                    :conflict_state, :last_accessed_at, :created_at)""", record,
             )
             self.db.commit()
@@ -2852,7 +2878,8 @@ All state-changing operations require structured, authorized tools and are check
             ).fetchall()
         return [self.get_memory(row["id"], agent_id, owner_id) for row in rows]  # type: ignore
 
-    def retrieve_memories(self, agent_id: str, owner_id: int, query: str, limit: int = 6) -> List[Dict[str, Any]]:
+    def retrieve_memories(self, agent_id: str, owner_id: int, query: str, limit: int = 6,
+                          visible_scopes: Optional[List[tuple]] = None) -> List[Dict[str, Any]]:
         words = {word for word in re.findall(r"[\w\u4e00-\u9fff]+", query.casefold()) if len(word) > 1}
         with self.lock:
             rows = self.db.execute(
@@ -2861,6 +2888,10 @@ All state-changing operations require structured, authorized tools and are check
             ).fetchall()
             scored = []
             for row in rows:
+                if visible_scopes is not None:
+                    scope = (row["scope_type"] or row["scope"] or "agent", row["scope_id"] or "")
+                    if scope not in visible_scopes:
+                        continue
                 value = dict(row)
                 content = self._decrypt_text(value["content_encrypted"])
                 overlap = sum(word in content.casefold() for word in words)
@@ -3301,6 +3332,8 @@ class MemoryPayload(BaseModel):
     kind: str = Field(default="fact", pattern="^(preference|profile|constraint|fact|experience)$")
     importance: int = Field(default=50, ge=0, le=100)
     expires_at: Optional[str] = Field(default=None, max_length=64)
+    scope_type: str = Field(default="agent", pattern="^(agent|conversation)$")
+    scope_id: str = Field(default="", max_length=128)
 
 
 def validate_base_url(value: str) -> None:
@@ -3393,6 +3426,8 @@ async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authoriz
             raise HTTPException(status_code=409, detail="Channel 会话映射无效")
     else:
         conversation = database().create_conversation(payload.agent_id, payload.owner_user_id, payload.title)
+        if conversation is not None:
+            database().set_conversation_channel(conversation["id"], payload.owner_user_id, payload.provider, payload.scope_type, payload.scope_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="无法创建 Channel 会话")
     run = database().create_run(conversation["id"], payload.owner_user_id, payload.content.strip())
@@ -4116,7 +4151,12 @@ async def list_memories(agent_id: str, authorization: Optional[str] = Header(Non
 async def create_memory(agent_id: str, payload: MemoryPayload, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     user = await authenticated_user(authorization)
     try:
-        memory = database().create_memory(agent_id, user["user_id"], payload.model_dump())
+        data = payload.model_dump()
+        if data["scope_type"] == "conversation":
+            conversation = database().get_conversation(data["scope_id"], user["user_id"])
+            if conversation is None or conversation["agent_id"] != agent_id:
+                raise ValueError("会话记忆的目标会话无效")
+        memory = database().create_memory(agent_id, user["user_id"], data)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if memory is None:
@@ -4314,7 +4354,16 @@ async def orchestrate_run(run_id: str, recover: bool = False, resume_confirmatio
     declaration_tokens = sum(len(json.dumps(item, ensure_ascii=False).encode("utf-8")) // 3 + 1 for item in declarations)
     memories = []
     if context.get("memory_enabled"):
-        memories = database().retrieve_memories(context["agent_id"], context["initiated_by_user_id"], history[-1]["content"] if history else "")
+        visible_scopes = [("agent", ""), ("conversation", context["conversation_id"])]
+        if context.get("channel_provider") == "qq":
+            if context.get("channel_scope_type") == "c2c":
+                visible_scopes.append(("qq_user", context.get("channel_scope_id", "")))
+            elif context.get("channel_scope_type") == "group":
+                visible_scopes.append(("qq_group", context.get("channel_scope_id", "")))
+        memories = database().retrieve_memories(
+            context["agent_id"], context["initiated_by_user_id"],
+            history[-1]["content"] if history else "", visible_scopes=visible_scopes,
+        )
     messages, manifest = prepare_context(
         context["system_prompt"], history, policy, int(context["max_tokens"]), len(declarations), declaration_tokens, memories
     )

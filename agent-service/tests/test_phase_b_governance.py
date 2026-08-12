@@ -51,6 +51,22 @@ class PhaseBGovernanceTest(unittest.TestCase):
         self.assertEqual({item["conflict_state"] for item in memories}, {"conflicted"})
         self.assertTrue(self.store.delete_memory(second["id"], self.agent["id"], 11))
 
+    def test_memory_scopes_only_return_the_current_conversation_or_global_memory(self):
+        other = self.store.create_conversation(self.agent["id"], 11)
+        global_memory = self.store.create_memory(self.agent["id"], 11, {"content": "所有项目都使用中文", "kind": "fact"})
+        current_memory = self.store.create_memory(self.agent["id"], 11, {
+            "content": "当前项目叫 Alpha", "kind": "fact", "scope_type": "conversation", "scope_id": self.conversation["id"],
+        })
+        other_memory = self.store.create_memory(self.agent["id"], 11, {
+            "content": "另一个项目叫 Beta", "kind": "fact", "scope_type": "conversation", "scope_id": other["id"],
+        })
+        selected = self.store.retrieve_memories(
+            self.agent["id"], 11, "项目", limit=10,
+            visible_scopes=[("agent", ""), ("conversation", self.conversation["id"])],
+        )
+        self.assertEqual({item["id"] for item in selected}, {global_memory["id"], current_memory["id"]})
+        self.assertNotIn(other_memory["id"], {item["id"] for item in selected})
+
     def test_legacy_unconfirmed_writes_are_never_declared_to_a_model(self):
         tools = [
             {"name": "read", "description": "", "config": {"method": "GET"}, "input_schema": {"type": "object"}},

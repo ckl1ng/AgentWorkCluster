@@ -436,6 +436,10 @@ async def scope_lock_for(scope_key: str) -> asyncio.Lock:
         return lock
 
 
+def channel_scope_key(agent_id: str, event: NormalizedEvent) -> str:
+    return "{}:{}:{}:{}".format(agent_id, event.bot_id, event.scope_type, event.scope_id)
+
+
 def _signature(event_ts: str, plain_token: str, client_secret: Optional[str] = None) -> str:
     message = (event_ts + plain_token).encode("utf-8")
     if settings.signature_mode == "none":
@@ -521,7 +525,9 @@ async def wait_for_run(run_id: str, config: QQConnectionConfig, event: Normalize
 async def process_event(event: NormalizedEvent, runtime: "QQRuntime") -> None:
     assert store is not None
     config = runtime.config
-    scope_key = "{}:{}:{}".format(event.bot_id, event.scope_type, event.scope_id)
+    # A bot may be connected to more than one Agent. Keep provider scopes
+    # separate per Agent so one connection cannot reuse another Agent's history.
+    scope_key = channel_scope_key(config.agent_id, event)
     try:
         if _now() >= event_passive_deadline(event):
             store.expire_event(event.event_key, "QQ passive reply window expired before processing")

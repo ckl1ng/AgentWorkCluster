@@ -19,7 +19,7 @@ os.environ.setdefault("QQ_WEBHOOK_SIGNATURE_MODE", "hmac-sha256")
 from app.main import (
     OP_CALLBACK_VERIFY, OP_DISPATCH, OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HTTP_CALLBACK_ACK,
     OP_IDENTIFY, OP_INVALID_SESSION, OP_RECONNECT, OP_RESUME, OP_HELLO,
-    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, heartbeat_payload, identify_payload, normalize_event, resume_payload, settings, _signature,
+    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, channel_scope_key, heartbeat_payload, identify_payload, normalize_event, resume_payload, settings, _signature,
 )
 import app.main as gateway_main
 
@@ -46,6 +46,14 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(event.scope_type, "c2c")
         self.assertEqual(event.scope_id, "user-1")
         self.assertEqual(event.sender_id, "user-1")
+
+    def test_channel_scope_isolated_per_agent_and_user(self):
+        first = normalize_event("bot", {"id": "event-a", "t": "C2C_MESSAGE_CREATE", "d": {"author": {"user_openid": "user-a"}, "content": "hello"}})
+        second = normalize_event("bot", {"id": "event-b", "t": "C2C_MESSAGE_CREATE", "d": {"author": {"user_openid": "user-b"}, "content": "hello"}})
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(channel_scope_key("agent-1", first), channel_scope_key("agent-2", first))
+        self.assertNotEqual(channel_scope_key("agent-1", first), channel_scope_key("agent-1", second))
 
     def test_inbox_and_outbound_are_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
