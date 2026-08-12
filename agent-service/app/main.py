@@ -103,6 +103,37 @@ BUILTIN_TOOLS = [
         "config": {"builtin": "amap_weather"}, "input_schema": AMAP_WEATHER_INPUT_SCHEMA,
         "confirmation_mode": "none", "side_effect": "read", "provider_version": "amap-weather-v1",
     },
+    {
+        "name": "web_fetch", "description": "抓取并提取公开网页内容。", "kind": "mcp_stdio",
+        "config": {"command": "uvx", "args": ["mcp-server-fetch"], "remote_tool_name": "fetch", "timeout_seconds": 30, "source": "mcp-server-fetch"},
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}, "max_length": {"type": "integer", "minimum": 1, "maximum": 100000}}, "required": ["url"], "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "read", "provider_version": "mcp-stdio-fetch-v1",
+    },
+    {
+        "name": "qq_list_groups", "description": "列出当前 Agent 已登记、可主动投递的 QQ 群。", "kind": "local",
+        "config": {"builtin": "qq_list_groups"}, "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "read", "provider_version": "qq-autonomy-v1",
+    },
+    {
+        "name": "qq_list_group_members", "description": "列出当前 Agent 在指定 QQ 群中已观察到的成员。", "kind": "local",
+        "config": {"builtin": "qq_list_group_members"}, "input_schema": {"type": "object", "properties": {"group_openid": {"type": "string", "minLength": 1, "maxLength": 256}}, "required": ["group_openid"], "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "read", "provider_version": "qq-autonomy-v1",
+    },
+    {
+        "name": "qq_send_group_message", "description": "主动向已登记的 QQ 群发送文本消息。", "kind": "local",
+        "config": {"builtin": "qq_send_group_message"}, "input_schema": {"type": "object", "properties": {"group_openid": {"type": "string", "minLength": 1, "maxLength": 256}, "content": {"type": "string", "minLength": 1, "maxLength": 5000}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["group_openid", "content", "idempotency_key"], "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "write", "provider_version": "qq-autonomy-v1",
+    },
+    {
+        "name": "qq_remind_group_member", "description": "主动在已登记 QQ 群中 @ 已知成员并发送提醒。", "kind": "local",
+        "config": {"builtin": "qq_remind_group_member"}, "input_schema": {"type": "object", "properties": {"group_openid": {"type": "string", "minLength": 1, "maxLength": 256}, "member_openid": {"type": "string", "minLength": 1, "maxLength": 256}, "content": {"type": "string", "minLength": 1, "maxLength": 5000}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["group_openid", "member_openid", "content", "idempotency_key"], "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "write", "provider_version": "qq-autonomy-v1",
+    },
+    {
+        "name": "timer_create", "description": "在指定 UTC 时刻唤醒当前 Agent 执行提示词。", "kind": "local",
+        "config": {"builtin": "timer_create"}, "input_schema": {"type": "object", "properties": {"run_at": {"type": "string", "format": "date-time"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 50000}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["run_at", "prompt", "idempotency_key"], "additionalProperties": False},
+        "confirmation_mode": "none", "side_effect": "write", "provider_version": "agent-schedule-v1",
+    },
 ]
 
 TASK_TOOL_DEFINITIONS = [
@@ -400,6 +431,17 @@ class AgentStore:
                   owner_user_id INTEGER NOT NULL, created_at TEXT NOT NULL,
                   PRIMARY KEY(provider, bot_id, event_id)
                 );
+                CREATE TABLE IF NOT EXISTS agent_status (
+                  conversation_id TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT 'user',
+                  status_encrypted BLOB NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_schedules (
+                  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL,
+                  run_at TEXT NOT NULL, prompt_encrypted BLOB NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                  idempotency_key TEXT NOT NULL, last_triggered_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  UNIQUE(agent_id, owner_user_id, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS agent_schedules_due_idx ON agent_schedules (enabled, run_at);
                 CREATE TABLE IF NOT EXISTS local_agent_devices (
                   id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL, display_name TEXT NOT NULL,
                   platform TEXT NOT NULL DEFAULT '', cli_version TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'offline',
@@ -2067,6 +2109,8 @@ class AgentStore:
                 continue
             row = self.db.execute("SELECT encrypted_config FROM tools WHERE id = ?", (tool["id"],)).fetchone()
             tool["config"] = self._decrypt_json(row[0])
+            tool["_agent_id"] = snapshot["id"]
+            tool["_owner_user_id"] = owner_id
         snapshot["tools"] = tools
         self.db.execute("INSERT INTO run_snapshots VALUES (?, ?, ?)", (run_id, self._encrypt_json(snapshot), now()))
 
@@ -2533,8 +2577,70 @@ All state-changing operations require structured, authorized tools and are check
                 "INSERT INTO conversations (id, agent_id, owner_user_id, title, context_epoch, channel_provider, channel_scope_type, channel_scope_id, deleted_at, created_at, updated_at) VALUES (:id, :agent_id, :owner_user_id, :title, :context_epoch, :channel_provider, :channel_scope_type, :channel_scope_id, :deleted_at, :created_at, :updated_at)",
                 conversation,
             )
+            self.db.execute(
+                "INSERT INTO agent_status (conversation_id, source, status_encrypted, updated_at) VALUES (?, 'user', ?, ?)",
+                (conversation_id, self._encrypt_json({"time": timestamp, "group_members": []}), timestamp),
+            )
             self.db.commit()
         return conversation
+
+    def conversation_status(self, conversation_id: str, owner_id: int) -> Optional[Dict[str, Any]]:
+        if self.get_conversation(conversation_id, owner_id) is None:
+            return None
+        with self.lock:
+            row = self.db.execute("SELECT source, status_encrypted, updated_at FROM agent_status WHERE conversation_id = ?", (conversation_id,)).fetchone()
+        if row is None:
+            return {"source": "user", "time": "", "group_members": [], "updated_at": ""}
+        status = self._decrypt_json(row["status_encrypted"])
+        return {"source": row["source"], "time": str(status.get("time") or ""), "group_members": list(status.get("group_members") or []), "updated_at": row["updated_at"]}
+
+    def update_channel_status(self, conversation_id: str, owner_id: int, member_name: str) -> None:
+        member_name = member_name.strip()[:120]
+        if not member_name:
+            return
+        timestamp = now()
+        with self.lock:
+            row = self.db.execute("SELECT status_encrypted FROM agent_status WHERE conversation_id = ?", (conversation_id,)).fetchone()
+            status = self._decrypt_json(row["status_encrypted"]) if row else {"time": timestamp, "group_members": []}
+            members = [str(item)[:120] for item in status.get("group_members", []) if str(item).strip()]
+            if member_name not in members:
+                members.append(member_name)
+            status = {"time": timestamp, "group_members": members}
+            self.db.execute("INSERT INTO agent_status (conversation_id, source, status_encrypted, updated_at) VALUES (?, 'user', ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET source = 'user', status_encrypted = excluded.status_encrypted, updated_at = excluded.updated_at", (conversation_id, self._encrypt_json(status), timestamp))
+            self.db.commit()
+
+    def create_schedule(self, agent_id: str, owner_id: int, run_at: str, prompt: str, idempotency_key: str) -> Dict[str, Any]:
+        agent = self.get_agent(agent_id, owner_id)
+        if agent is None:
+            raise ValueError("Agent 未找到")
+        try:
+            parsed = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError
+            run_at = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError as exc:
+            raise ValueError("run_at 必须是带时区的 ISO-8601 时间") from exc
+        timestamp = now()
+        record = {"id": str(uuid.uuid4()), "agent_id": agent_id, "owner_user_id": owner_id, "run_at": run_at, "prompt_encrypted": self._encrypt_text(prompt), "idempotency_key": idempotency_key, "created_at": timestamp, "updated_at": timestamp}
+        with self.lock:
+            existing = self.db.execute("SELECT * FROM agent_schedules WHERE agent_id = ? AND owner_user_id = ? AND idempotency_key = ?", (agent_id, owner_id, idempotency_key)).fetchone()
+            if existing is not None:
+                return {"id": existing["id"], "run_at": existing["run_at"], "enabled": bool(existing["enabled"]), "duplicate": True}
+            self.db.execute("INSERT INTO agent_schedules (id, agent_id, owner_user_id, run_at, prompt_encrypted, enabled, idempotency_key, last_triggered_at, created_at, updated_at) VALUES (:id, :agent_id, :owner_user_id, :run_at, :prompt_encrypted, 1, :idempotency_key, NULL, :created_at, :updated_at)", record)
+            self.db.commit()
+        return {"id": record["id"], "run_at": run_at, "enabled": True, "duplicate": False}
+
+    def claim_due_schedules(self, limit: int = 20) -> List[Dict[str, Any]]:
+        timestamp = now()
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM agent_schedules WHERE enabled = 1 AND last_triggered_at IS NULL AND run_at <= ? ORDER BY run_at LIMIT ?", (timestamp, limit)).fetchall()
+            claimed = []
+            for row in rows:
+                changed = self.db.execute("UPDATE agent_schedules SET last_triggered_at = ?, enabled = 0, updated_at = ? WHERE id = ? AND last_triggered_at IS NULL", (timestamp, timestamp, row["id"])).rowcount
+                if changed:
+                    claimed.append(dict(row))
+            self.db.commit()
+        return claimed
 
     def list_conversations(self, agent_id: str, owner_id: int) -> List[Dict[str, Any]]:
         with self.lock:
@@ -2596,7 +2702,7 @@ All state-changing operations require structured, authorized tools and are check
         for message in messages:
             encrypted = message.pop("content_encrypted", None)
             message["content"] = self._decrypt_text(encrypted) if encrypted else message.get("content", "")
-        return {"conversation": conversation, "messages": messages}
+        return {"conversation": conversation, "messages": messages, "agent_status": self.conversation_status(conversation_id, owner_id)}
 
     def create_run(self, conversation_id: str, owner_id: int, content: str, task_id: Optional[str] = None,
                    assignment_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -3068,6 +3174,7 @@ async def startup() -> None:
     if settings.redis_url:
         background_tasks.append(asyncio.create_task(outbox_publisher_loop()))
         background_tasks.append(asyncio.create_task(redis_event_relay()))
+    background_tasks.append(asyncio.create_task(schedule_loop()))
 
 
 @app.on_event("shutdown")
@@ -3264,6 +3371,7 @@ class ChannelEventPayload(BaseModel):
     scope_type: str = Field(min_length=1, max_length=32)
     scope_id: str = Field(min_length=1, max_length=256)
     sender_id: str = Field(default="", max_length=256)
+    member_name: str = Field(default="", max_length=120)
     content: str = Field(min_length=1, max_length=50000)
     agent_id: str = Field(min_length=1, max_length=128)
     owner_user_id: int = Field(ge=1)
@@ -3371,7 +3479,8 @@ async def validate_tool_payload(payload: ToolPayload) -> None:
         raise HTTPException(status_code=400, detail="非只读 HTTP 操作不能标记为 read")
     if payload.side_effect == "destructive" and payload.confirmation_mode != "per_call":
         raise HTTPException(status_code=400, detail="破坏性工具必须逐次确认")
-    if payload.side_effect == "write" and payload.confirmation_mode == "none":
+    internal_autonomy = payload.kind == "local" and str(payload.config.get("builtin", "")) in {"qq_send_group_message", "qq_remind_group_member", "timer_create"}
+    if payload.side_effect == "write" and payload.confirmation_mode == "none" and not internal_autonomy:
         raise HTTPException(status_code=400, detail="写工具必须要求确认")
     if payload.kind in {"http", "openapi", "mcp"}:
         if not url or len(url) > 2048:
@@ -3435,6 +3544,8 @@ async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authoriz
         raise HTTPException(status_code=404, detail="Channel 会话未找到")
     if run.get("error"):
         raise HTTPException(status_code=409, detail=run["error"])
+    if payload.provider == "qq" and payload.scope_type == "group":
+        database().update_channel_status(conversation["id"], payload.owner_user_id, payload.member_name or payload.sender_id)
     try:
         database().remember_channel_event(
             payload.provider, payload.bot_id, payload.event_id, conversation["id"], run["id"], payload.owner_user_id,
@@ -4222,6 +4333,11 @@ async def publish_event(event: Dict[str, Any]) -> None:
 async def execute_tool(tool: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Dispatch every provider through one policy-controlled runtime boundary."""
     kind = tool.get("kind", "http")
+    builtin = (tool.get("config") or {}).get("builtin")
+    if builtin == "web_fetch":
+        await assert_safe_public_url(str(arguments.get("url") or ""), settings.allow_http)
+    if builtin in {"qq_list_groups", "qq_list_group_members", "qq_send_group_message", "qq_remind_group_member", "timer_create"}:
+        return await execute_autonomy_tool(tool, arguments)
     if (tool.get("config") or {}).get("builtin") == "amap_weather":
         return await execute_amap_weather_tool(
             arguments, os.getenv("AMAP_WEATHER_API_KEY", ""), settings.allow_http, settings.tool_response_limit,
@@ -4233,6 +4349,23 @@ async def execute_tool(tool: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[
     if kind == "local":
         return await execute_local_tool(tool, arguments, settings.tool_response_limit)
     return await execute_http_tool(tool, arguments, settings.allow_http, settings.tool_response_limit)
+
+
+async def execute_autonomy_tool(tool: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
+    Draft202012Validator(tool["input_schema"]).validate(arguments)
+    builtin = tool["config"]["builtin"]
+    context_agent_id = str(tool.get("_agent_id") or "")
+    context_owner_id = int(tool.get("_owner_user_id") or 0)
+    if not context_agent_id or context_owner_id < 1:
+        raise RuntimeError("自主工具缺少运行身份")
+    if builtin == "timer_create":
+        return {"status": "ok", **database().create_schedule(context_agent_id, context_owner_id, arguments["run_at"], arguments["prompt"], arguments["idempotency_key"])}
+    if builtin == "qq_list_groups":
+        return await qq_gateway_request("GET", "/internal/v1/qq/groups/" + context_agent_id)
+    if builtin == "qq_list_group_members":
+        return await qq_gateway_request("GET", "/internal/v1/qq/groups/{}/members/{}".format(context_agent_id, arguments["group_openid"]))
+    payload = {"agent_id": context_agent_id, **arguments}
+    return await qq_gateway_request("POST", "/internal/v1/qq/proactive-messages", payload)
 
 
 async def redis_event_relay() -> None:
@@ -4312,6 +4445,23 @@ async def outbox_publisher_loop() -> None:
             await asyncio.sleep(1.0)
 
 
+async def schedule_loop() -> None:
+    while True:
+        try:
+            for schedule in database().claim_due_schedules():
+                conversation = database().create_conversation(schedule["agent_id"], int(schedule["owner_user_id"]), "自主定时任务")
+                if conversation is None:
+                    continue
+                run = database().create_run(conversation["id"], int(schedule["owner_user_id"]), database()._decrypt_text(schedule["prompt_encrypted"]))
+                if run and not run.get("error") and not run.get("local_dispatch"):
+                    await enqueue_run(run["id"])
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(1.0)
+
+
 async def enqueue_run(run_id: str) -> None:
     if not settings.redis_url:
         asyncio.create_task(orchestrate_run(run_id))
@@ -4346,6 +4496,10 @@ async def orchestrate_run(run_id: str, recover: bool = False, resume_confirmatio
     await emit(run_id, "agent.run.started", {"summary": "恢复运行" if recover else "开始调用模型"})
     task_history = database().task_run_messages(run_id)
     history = task_history if task_history is not None else database().model_messages(context["conversation_id"], context["context_epoch"])
+    status = database().conversation_status(context["conversation_id"], int(context["initiated_by_user_id"]))
+    if status is not None:
+        members = "、".join(str(item) for item in status["group_members"]) or "无"
+        history = [*history, {"role": "user", "content": "[会话状态栏 | 来源:user] 时间: {}；当前群会话已出现成员: {}。此状态仅属于当前会话。".format(status["time"] or now(), members)}]
     policy = context.get("run_policy") or {}
     if isinstance(policy, str):
         policy = json.loads(policy)
@@ -4474,7 +4628,7 @@ async def orchestrate_run(run_id: str, recover: bool = False, resume_confirmatio
                                 result = {"status": "denied", "error": "Task tool-call budget exhausted"}
                             # All write/destructive calls require a durable, argument-bound approval.
                             # Treating per-run as per-call is intentionally stricter than the configured minimum.
-                            elif tool.get("side_effect") in {"write", "destructive"} or tool.get("confirmation_mode") != "none":
+                            elif (tool.get("side_effect") in {"write", "destructive"} or tool.get("confirmation_mode") != "none") and not str((tool.get("config") or {}).get("builtin", "")).startswith(("qq_", "timer_")):
                                 confirmation = database().create_confirmation(run_id, call_id, call["name"], arguments, {
                                     "messages": messages, "call": assistant_call, "tool": tool,
                                     "assistant_content": turn.text or None, "tool_calls_used": tool_calls_used,

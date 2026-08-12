@@ -26,6 +26,7 @@
   let confirmation = null;
   let confirmationBusy = false;
   let localDevice = null;
+  let agentStatus = { source: 'user', time: '', group_members: [] };
 
   onMount(load);
   onDestroy(() => socket?.disconnect());
@@ -63,6 +64,7 @@
     if (!conversation) return;
     const data = await api.getAgentConversation(conversation.id);
     conversation = data.conversation;
+    agentStatus = data.agent_status || { source: 'user', time: '', group_members: [] };
     // Tool responses are context records, not chat bubbles. Keep this guard for
     // compatibility with older Agent API instances that still return role=tool.
     messageList = data.messages.filter(message => message.role === 'user' || message.role === 'assistant');
@@ -205,6 +207,7 @@
       conversations = [conversation, ...conversations];
       messageList = [];
       traces = {};
+      agentStatus = { source: 'user', time: '', group_members: [] };
       error = '';
       await tick();
       scrollBottom();
@@ -218,6 +221,7 @@
     conversation = next;
     messageList = [];
     traces = {};
+    agentStatus = { source: 'user', time: '', group_members: [] };
     confirmation = null;
     error = '';
     await loadConversation();
@@ -370,6 +374,11 @@
         </div>
       </article>
     {/each}
+    <aside class="agent-status" aria-label="会话状态栏">
+      <div><span>状态来源</span><strong>{agentStatus.source || 'user'}</strong></div>
+      <div><span>时间</span><time>{agentStatus.time ? new Date(agentStatus.time).toLocaleString() : '未更新'}</time></div>
+      <div><span>群成员</span><p>{agentStatus.group_members?.length ? agentStatus.group_members.join('、') : '暂无'}</p></div>
+    </aside>
   </div>
   {#if confirmation}<ToolConfirmation {confirmation} busy={confirmationBusy} on:decide={decideConfirmation} />{/if}
   {#if error && messageList.length}<p class="run-error" role="status">{error}</p>{/if}
@@ -386,8 +395,9 @@
   .agent-purpose { overflow: hidden; flex: 1; color: var(--color-text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.toolbar-actions { display: flex; gap: 6px; }.toolbar-actions .delete { color: var(--color-error); }
   button { min-height: 30px; padding: 0 9px; border: 1px solid var(--color-border); border-radius: 4px; background: transparent; color: var(--color-text-muted); cursor: pointer; font-size: 12px; } button:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); } button:disabled { opacity: .5; cursor: default; }
   .messages { flex: 1; overflow-y: auto; padding: 18px 0; }.status { display: grid; min-height: 180px; place-items: center; color: var(--color-text-muted); font-size: 13px; }.status.error, .run-error { color: var(--color-error); }
+  .agent-status { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:12px; margin:24px max(16px, 7vw) 4px; padding:10px 12px; border-top:1px solid var(--color-border); color:var(--color-text-muted); font-size:11px; }.agent-status div { min-width:0; }.agent-status span { display:block; margin-bottom:3px; font-size:10px; }.agent-status strong,.agent-status time,.agent-status p { color:var(--color-text); font:inherit; overflow-wrap:anywhere; }.agent-status p { margin:0; }
   .message-row { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 12px; padding: 0 max(16px, 7vw); }.message-row.user { flex-direction: row-reverse; }.message { max-width: min(780px, 78%); padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); border-radius: 8px; border-top-left-radius: 2px; background: var(--color-other-msg); }.message.user { border-color: color-mix(in srgb, var(--color-primary) 35%, transparent); border-top-left-radius: 8px; border-top-right-radius: 2px; background: var(--color-self-msg); }.message-meta { margin-bottom: 5px; color: var(--color-primary); font-size: 11px; font-weight: 600; }.message.user .message-meta { color: var(--color-text-muted); }.message-meta span { color: var(--color-primary); font-weight: 400; }.content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; font-size: 14px; }
   .run-process { margin: 8px 0 10px; border: 1px solid color-mix(in srgb, var(--color-primary) 22%, var(--color-border)); border-radius: 6px; background: color-mix(in srgb, var(--color-input) 78%, transparent); overflow: hidden; }.run-process > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: var(--color-primary); cursor: pointer; list-style-position: inside; user-select: none; }.process-title { font-size: 12px; font-weight: 700; }.process-count { margin-left: auto; color: var(--color-text-muted); font-size: 10px; }.run-meta { display:flex; flex-wrap:wrap; gap:5px; padding: 0 10px 7px; }.run-meta span { padding:2px 5px; border:1px solid var(--color-border); border-radius:3px; color:var(--color-text-muted); font-size:10px; }.trace-steps { display: grid; gap: 5px; padding: 0 7px 8px; }.trace-step { border-left: 2px solid var(--color-border); color: var(--color-text-muted); font-size: 12px; line-height: 1.55; }.trace-step > summary { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; list-style: none; user-select: none; }.trace-step > summary::-webkit-details-marker, .run-process > summary::-webkit-details-marker { display: none; }.trace-step > summary::before, .run-process > summary::before { content: '›'; color: var(--color-text-muted); font-size: 16px; transition: transform .15s ease; }.trace-step[open] > summary::before, .run-process[open] > summary::before { transform: rotate(90deg); }.step-icon { display: inline-grid; width: 19px; height: 19px; place-items: center; border-radius: 4px; background: color-mix(in srgb, var(--color-primary) 17%, var(--color-input)); color: var(--color-primary); font-size: 10px; font-weight: 700; }.trace-step > div { max-height: 260px; overflow: auto; padding: 0 9px 8px 33px; white-space: pre-wrap; overflow-wrap: anywhere; }.trace-step.thought { border-left-color: var(--color-primary); }.trace-step.dialogue { display: flex; gap: 7px; padding: 6px 8px; }.trace-step.dialogue > div { max-height: none; padding: 0; }.trace-step.tool { border-left-color: color-mix(in srgb, var(--color-online) 65%, var(--color-border)); }.tool-name { color: var(--color-text); font-weight: 600; }.tool-type { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-muted); font-size: 10px; }.tool-status { margin-left: auto; color: var(--color-online); font-size: 10px; }.tool-waiting { color: var(--color-warning, #d99b36); }.tool-detail { padding-bottom: 8px !important; }.tool-label { margin: 4px 0 3px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; }.tool-detail pre { max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg); color: var(--color-text); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }.tool-summary, .tool-result { margin-top: 5px; color: var(--color-text-muted); font-size: 11px; }.trace-empty { padding: 0 10px 9px; color: var(--color-text-muted); font-size: 11px; }.final-result { padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent); }.result-label { margin-bottom: 4px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
   .run-error { padding: 0 16px 8px; font-size: 12px; }.composer { display: flex; flex-shrink: 0; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--color-border); background: var(--color-surface); }.composer textarea { flex: 1; min-width: 0; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; padding: 9px 10px; resize: none; outline: none; }.composer textarea:focus { border-color: var(--color-primary); }.composer > button { align-self: end; min-width: 54px; border-color: var(--color-primary); background: var(--color-primary); color: #fff; font-weight: 700; }.composer > button.cancel { border-color: var(--color-error); background: transparent; color: var(--color-error); }
-  @media (max-width: 600px) { .conversation-sidebar { flex-basis:112px; }.conversation-sidebar-heading { padding:0 7px; }.conversation-items { padding:5px; }.conversation-items button { padding:7px 5px; font-size:11px; }.agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
+  @media (max-width: 600px) { .conversation-sidebar { flex-basis:112px; }.conversation-sidebar-heading { padding:0 7px; }.conversation-items { padding:5px; }.conversation-items button { padding:7px 5px; font-size:11px; }.agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.agent-status { grid-template-columns:1fr; gap:7px; margin-inline:12px; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
 </style>

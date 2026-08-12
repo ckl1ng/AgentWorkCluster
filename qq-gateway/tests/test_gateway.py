@@ -5,6 +5,8 @@ import os
 import tempfile
 import unittest
 
+import httpx
+
 from cryptography.fernet import Fernet
 import websockets
 
@@ -19,7 +21,7 @@ os.environ.setdefault("QQ_WEBHOOK_SIGNATURE_MODE", "hmac-sha256")
 from app.main import (
     OP_CALLBACK_VERIFY, OP_DISPATCH, OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HTTP_CALLBACK_ACK,
     OP_IDENTIFY, OP_INVALID_SESSION, OP_RECONNECT, OP_RESUME, OP_HELLO,
-    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, channel_scope_key, heartbeat_payload, identify_payload, normalize_event, resume_payload, settings, _signature,
+    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, channel_scope_key, heartbeat_payload, identify_payload, normalize_event, register_dispatch_directory, resume_payload, settings, _signature,
 )
 import app.main as gateway_main
 
@@ -66,6 +68,37 @@ class GatewayTest(unittest.TestCase):
             store.complete_outbound("k", "message-1")
             self.assertEqual(store.claim_outbound("k"), "sent")
             store.db.close()
+
+    def test_group_directory_and_proactive_delivery_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GatewayStore(directory + "/gateway.db", Fernet.generate_key().decode("ascii"))
+            store.register_group("agent", "bot", "group", "GROUP_ADD_ROBOT")
+            store.register_group_member("agent", "group", "member", "张三")
+            self.assertTrue(store.has_group("agent", "group"))
+            self.assertEqual(store.list_group_members("agent", "group")[0]["display_name"], "张三")
+            claimed, delivery_id = store.claim_proactive("agent", "group", "", "key")
+            self.assertEqual(claimed, "claimed")
+            store.complete_proactive(delivery_id, "message")
+            self.assertEqual(store.claim_proactive("agent", "group", "", "key")[0], "sent")
+            store.db.close()
+
+    def test_active_message_payload_never_contains_passive_reply_ids(self):
+        async def exercise():
+            client = QQApiClient(QQConnectionConfig("agent", 7, "app", "secret", "bot", "https://qq.test"))
+            async def access_token(force=False):
+                return "token"
+            client.access_token = access_token
+            captured = {}
+            async def post(url, headers, json):
+                captured.update(json)
+                return httpx.Response(200, json={"id": "message"}, request=httpx.Request("POST", url))
+            client.client.post = post
+            await client.send_proactive_group_message("group", "hello")
+            self.assertEqual(captured, {"msg_type": 0, "content": "hello"})
+            await client.send_proactive_group_message("group", "reminder", "member")
+            self.assertEqual(captured, {"msg_type": 0, "content": "<@member> reminder"})
+            await client.close()
+        asyncio.run(exercise())
 
     def test_event_claim_prevents_duplicate_work(self):
         with tempfile.TemporaryDirectory() as directory:

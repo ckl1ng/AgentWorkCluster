@@ -10,6 +10,7 @@ import re
 import secrets
 import sqlite3
 import time
+import uuid
 from urllib.parse import urlparse
 from dataclasses import asdict, dataclass
 from threading import RLock
@@ -122,6 +123,23 @@ class GatewayStore:
                   event_key TEXT PRIMARY KEY, status TEXT NOT NULL,
                   provider_message_id TEXT, last_error TEXT NOT NULL DEFAULT '',
                   attempts INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS qq_groups (
+                  agent_id TEXT NOT NULL, bot_id TEXT NOT NULL, group_openid TEXT NOT NULL,
+                  source TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                  PRIMARY KEY(agent_id, group_openid)
+                );
+                CREATE TABLE IF NOT EXISTS qq_group_members (
+                  agent_id TEXT NOT NULL, group_openid TEXT NOT NULL, member_openid TEXT NOT NULL,
+                  display_name TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                  PRIMARY KEY(agent_id, group_openid, member_openid)
+                );
+                CREATE TABLE IF NOT EXISTS proactive_outbound (
+                  delivery_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, group_openid TEXT NOT NULL,
+                  member_openid TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL, status TEXT NOT NULL,
+                  provider_message_id TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+                  attempts INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                  UNIQUE(agent_id, idempotency_key)
                 );
                 CREATE TABLE IF NOT EXISTS qq_connections (
                   agent_id TEXT PRIMARY KEY, owner_user_id INTEGER NOT NULL,
@@ -238,6 +256,61 @@ class GatewayStore:
             self.db.execute("UPDATE outbound_messages SET status = 'failed', last_error = ?, updated_at = ? WHERE event_key = ?", (error[:500], _now(), event_key))
             self.db.commit()
 
+    def register_group(self, agent_id: str, bot_id: str, group_openid: str, source: str) -> None:
+        if not group_openid:
+            return
+        timestamp = _now()
+        with self.lock:
+            self.db.execute("INSERT INTO qq_groups(agent_id, bot_id, group_openid, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, group_openid) DO UPDATE SET bot_id = excluded.bot_id, source = excluded.source, updated_at = excluded.updated_at", (agent_id, bot_id, group_openid, source, timestamp, timestamp))
+            self.db.commit()
+
+    def register_group_member(self, agent_id: str, group_openid: str, member_openid: str, display_name: str) -> None:
+        if not group_openid or not member_openid:
+            return
+        timestamp = _now()
+        display_name = (display_name or member_openid)[:120]
+        with self.lock:
+            self.db.execute("INSERT INTO qq_group_members(agent_id, group_openid, member_openid, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, group_openid, member_openid) DO UPDATE SET display_name = excluded.display_name, updated_at = excluded.updated_at", (agent_id, group_openid, member_openid, display_name, timestamp, timestamp))
+            self.db.commit()
+
+    def list_groups(self, agent_id: str) -> List[Dict[str, Any]]:
+        with self.lock:
+            rows = self.db.execute("SELECT group_openid, source, updated_at FROM qq_groups WHERE agent_id = ? ORDER BY updated_at DESC", (agent_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_group_members(self, agent_id: str, group_openid: str) -> List[Dict[str, Any]]:
+        with self.lock:
+            rows = self.db.execute("SELECT member_openid, display_name, updated_at FROM qq_group_members WHERE agent_id = ? AND group_openid = ? ORDER BY created_at", (agent_id, group_openid)).fetchall()
+        return [dict(row) for row in rows]
+
+    def has_group(self, agent_id: str, group_openid: str) -> bool:
+        with self.lock:
+            return self.db.execute("SELECT 1 FROM qq_groups WHERE agent_id = ? AND group_openid = ?", (agent_id, group_openid)).fetchone() is not None
+
+    def has_group_member(self, agent_id: str, group_openid: str, member_openid: str) -> bool:
+        with self.lock:
+            return self.db.execute("SELECT 1 FROM qq_group_members WHERE agent_id = ? AND group_openid = ? AND member_openid = ?", (agent_id, group_openid, member_openid)).fetchone() is not None
+
+    def claim_proactive(self, agent_id: str, group_openid: str, member_openid: str, idempotency_key: str) -> Tuple[str, str]:
+        timestamp, delivery_id = _now(), str(uuid.uuid4())
+        with self.lock:
+            row = self.db.execute("SELECT delivery_id, status FROM proactive_outbound WHERE agent_id = ? AND idempotency_key = ?", (agent_id, idempotency_key)).fetchone()
+            if row is not None:
+                return str(row["status"]), str(row["delivery_id"])
+            self.db.execute("INSERT INTO proactive_outbound(delivery_id, agent_id, group_openid, member_openid, idempotency_key, status, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'sending', 1, ?, ?)", (delivery_id, agent_id, group_openid, member_openid, idempotency_key, timestamp, timestamp))
+            self.db.commit()
+        return "claimed", delivery_id
+
+    def complete_proactive(self, delivery_id: str, message_id: str) -> None:
+        with self.lock:
+            self.db.execute("UPDATE proactive_outbound SET status = 'sent', provider_message_id = ?, updated_at = ? WHERE delivery_id = ?", (message_id, _now(), delivery_id))
+            self.db.commit()
+
+    def fail_proactive(self, delivery_id: str, error: str) -> None:
+        with self.lock:
+            self.db.execute("UPDATE proactive_outbound SET status = 'failed', last_error = ?, updated_at = ? WHERE delivery_id = ?", (error[:500], _now(), delivery_id))
+            self.db.commit()
+
     def save_connection(self, config: "QQConnectionConfig") -> None:
         with self.lock:
             self.db.execute(
@@ -295,6 +368,7 @@ class NormalizedEvent:
     bot_id: str
     message_id: str
     received_at: float = 0.0
+    member_name: str = ""
 
     def payload(self) -> Dict[str, Any]:
         return asdict(self)
@@ -376,6 +450,29 @@ class QQApiClient:
             body = response.json() if response.content else {}
             return str(body.get("id", body.get("message_id", "")))
         raise RuntimeError(last_error or "QQ message send failed")
+
+    async def send_proactive_group_message(self, group_openid: str, content: str, member_openid: str = "") -> str:
+        url = self.config.api_base_url + "/v2/groups/{}/messages".format(group_openid)
+        # QQ active messages must not carry msg_id or event_id. QQ renders the
+        # platform mention token in ordinary text messages.
+        if member_openid:
+            content = "<@{}> {}".format(member_openid, content)
+        payload = {"msg_type": 0, "content": content[:settings.max_content_length]}
+        last_error = ""
+        for attempt in range(3):
+            token = await self.access_token(force=attempt > 0 and last_error == "401")
+            response = await self.client.post(url, headers={"Authorization": "QQBot " + token}, json=payload)
+            if response.status_code == 401:
+                last_error = "401"
+                continue
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = "QQ API HTTP {}".format(response.status_code)
+                await asyncio.sleep(min(4.0, 0.5 * (2 ** attempt)))
+                continue
+            response.raise_for_status()
+            body = response.json() if response.content else {}
+            return str(body.get("id", body.get("message_id", "")))
+        raise RuntimeError(last_error or "QQ proactive message send failed")
 
     async def gateway_url(self) -> str:
         token = await self.access_token()
@@ -478,13 +575,30 @@ def normalize_event(bot_id: str, payload: Dict[str, Any]) -> Optional[Normalized
     if not scope_id or not content:
         return None
     event_key = "qq:{}:{}".format(bot_id, event_id)
-    return NormalizedEvent(event_key, event_id, event_type, scope_type, scope_id, sender_id, content[:settings.max_content_length], bot_id, str(data.get("id") or event_id), _now())
+    member_name = str(author.get("nickname") or author.get("username") or data.get("member_name") or sender_id)
+    return NormalizedEvent(event_key, event_id, event_type, scope_type, scope_id, sender_id, content[:settings.max_content_length], bot_id, str(data.get("id") or event_id), _now(), member_name)
+
+
+def register_dispatch_directory(runtime: "QQRuntime", payload: Dict[str, Any]) -> None:
+    """Persist QQ group/member discovery without making it an Agent message."""
+    assert store is not None
+    event_type = str(payload.get("t") or "")
+    data = payload.get("d") if isinstance(payload.get("d"), dict) else {}
+    group_openid = str(data.get("group_openid") or "")
+    if event_type not in {"GROUP_ADD_ROBOT", "GROUP_AT_MESSAGE_CREATE"} or not group_openid:
+        return
+    store.register_group(runtime.config.agent_id, runtime.config.bot_id or runtime.config.app_id, group_openid, event_type)
+    author = data.get("author") if isinstance(data.get("author"), dict) else {}
+    member_openid = str(author.get("member_openid") or "")
+    display_name = str(author.get("nickname") or author.get("username") or data.get("member_name") or member_openid)
+    if member_openid:
+        store.register_group_member(runtime.config.agent_id, group_openid, member_openid, display_name)
 
 
 async def submit_to_agent(event: NormalizedEvent, config: QQConnectionConfig, conversation_id: Optional[str]) -> Dict[str, Any]:
     payload = {
         "provider": "qq", "bot_id": event.bot_id, "event_id": event.event_id, "event_type": event.event_type,
-        "scope_type": event.scope_type, "scope_id": event.scope_id, "sender_id": event.sender_id,
+        "scope_type": event.scope_type, "scope_id": event.scope_id, "sender_id": event.sender_id, "member_name": event.member_name or event.sender_id,
         "content": event.content, "agent_id": config.agent_id, "owner_user_id": config.owner_user_id,
         "conversation_id": conversation_id, "title": "QQ {} {}".format(event.scope_type, event.scope_id),
     }
@@ -689,6 +803,7 @@ class QQRuntime:
                                     store.set_connection_status(self.config.agent_id, "connected", bot_id=bot_id)
                             elif event_type == "RESUMED":
                                 store.set_connection_status(self.config.agent_id, "connected")
+                            register_dispatch_directory(self, payload)
                             event = normalize_event(self.config.bot_id or self.config.app_id, payload)
                             if event is not None:
                                 assert store is not None
@@ -925,6 +1040,63 @@ async def disconnect_connection(agent_id: str, authorization: Optional[str] = He
     await require_service(authorization)
     await stop_connection(agent_id)
     return {"agent_id": agent_id, "configured": False, "status": "disconnected"}
+
+
+@app.get("/internal/v1/qq/groups/{agent_id}")
+async def list_registered_groups(agent_id: str, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    await require_service(authorization)
+    if store is None:
+        raise HTTPException(status_code=503, detail="QQ Gateway 尚未启动")
+    return {"groups": store.list_groups(agent_id)}
+
+
+@app.get("/internal/v1/qq/groups/{agent_id}/members/{group_openid}")
+async def list_registered_group_members(agent_id: str, group_openid: str, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    await require_service(authorization)
+    if store is None:
+        raise HTTPException(status_code=503, detail="QQ Gateway 尚未启动")
+    if not store.has_group(agent_id, group_openid):
+        raise HTTPException(status_code=404, detail="目标 QQ 群未登记")
+    return {"members": store.list_group_members(agent_id, group_openid)}
+
+
+@app.post("/internal/v1/qq/proactive-messages")
+async def send_proactive_message(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    await require_service(authorization)
+    if store is None:
+        raise HTTPException(status_code=503, detail="QQ Gateway 尚未启动")
+    try:
+        payload = json.loads((await request.body()).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="主动消息请求无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="主动消息请求必须是对象")
+    agent_id = str(payload.get("agent_id") or "").strip()
+    group_openid = str(payload.get("group_openid") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    member_openid = str(payload.get("member_openid") or "").strip()
+    if not agent_id or not group_openid or not content or not idempotency_key:
+        raise HTTPException(status_code=422, detail="主动消息缺少 agent_id、group_openid、content 或 idempotency_key")
+    runtime = runtimes.get(agent_id)
+    if runtime is None:
+        raise HTTPException(status_code=404, detail="Agent 的 QQ 连接未运行")
+    if not store.has_group(agent_id, group_openid):
+        raise HTTPException(status_code=404, detail="目标 QQ 群未登记")
+    if member_openid and not store.has_group_member(agent_id, group_openid, member_openid):
+        raise HTTPException(status_code=404, detail="目标 QQ 群成员未登记")
+    status, delivery_id = store.claim_proactive(agent_id, group_openid, member_openid, idempotency_key)
+    if status == "sent":
+        return {"delivery_id": delivery_id, "status": "sent", "duplicate": True}
+    if status == "sending":
+        return {"delivery_id": delivery_id, "status": "sending", "duplicate": True}
+    try:
+        message_id = await runtime.api.send_proactive_group_message(group_openid, content, member_openid)
+        store.complete_proactive(delivery_id, message_id)
+        return {"delivery_id": delivery_id, "status": "sent", "message_id": message_id}
+    except Exception as exc:
+        store.fail_proactive(delivery_id, str(exc))
+        raise HTTPException(status_code=502, detail="QQ 主动消息发送失败") from exc
 
 
 @app.post("/qq/webhook/{bot_id}")

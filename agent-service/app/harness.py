@@ -138,7 +138,8 @@ def tool_declarations(tools: List[Dict[str, Any]], token_budget: int = 4096) -> 
     used = 0
     for tool in tools:
         method = str(tool.get("config", {}).get("method", "GET")).upper()
-        if method not in {"GET", "HEAD"} and tool.get("side_effect", "write") == "write" and tool.get("confirmation_mode", "none") == "none":
+        internal_autonomy = str(tool.get("config", {}).get("builtin", "")) in {"qq_send_group_message", "qq_remind_group_member", "timer_create"}
+        if method not in {"GET", "HEAD"} and tool.get("side_effect", "write") == "write" and tool.get("confirmation_mode", "none") == "none" and not internal_autonomy:
             # Do not expose legacy or malformed write tools that lack the Phase B approval gate.
             continue
         declaration = {
