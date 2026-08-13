@@ -22,6 +22,7 @@
     deviceId: agent.default_device_id || '',
     workspaceId: agent.default_workspace_id || '',
     modelMode: agent.model_mode || 'server_proxy',
+    profile: agent.model?.model_id || 'default',
   };
   let form = {
     name: agent.name,
@@ -43,6 +44,7 @@
   let activeTab = 'general';
   let localLoaded = false;
   let governanceDirty = false;
+  $: isAwc = agent.execution_target === 'local' && agent.model?.base_url === 'awc://local';
 
   onMount(loadQqConnection);
 
@@ -148,6 +150,18 @@
     }
   }
 
+  async function bindAwc() {
+    if (!local.deviceId || !local.workspaceId || !local.profile?.trim()) return;
+    bindingLocal = true;
+    error = '';
+    try {
+      const updated = await api.bindAwcAgent(agent.id, { device_id: local.deviceId, workspace_id: local.workspaceId, profile: local.profile.trim() });
+      agent = { ...agent, ...updated };
+      dispatch('updated', { agent });
+    } catch (e) { error = e.message || '无法更新 AWC CLI 绑定'; }
+    finally { bindingLocal = false; }
+  }
+
   async function approvePairing() {
     if (!pairing.id.trim() || !pairing.code.trim()) return;
     approvingPairing = true;
@@ -185,9 +199,6 @@
     try {
       const payload = {
         name: form.name.trim(), description: form.description.trim(),
-        model_display_name: form.model_display_name.trim(), base_url: form.base_url.trim(),
-        model_id: form.model_id.trim(), temperature: Number(form.temperature),
-        max_tokens: Number(form.max_tokens), timeout_seconds: Number(form.timeout_seconds),
         system_prompt: form.system_prompt,
         run_policy: {
           max_tool_calls: Number(form.max_tool_calls), max_concurrent_runs: Number(form.max_concurrent_runs),
@@ -195,7 +206,11 @@
           context_window: Number(form.context_window),
         },
       };
-      if (form.api_key) payload.api_key = form.api_key;
+      if (!isAwc) {
+        payload.model_display_name = form.model_display_name.trim(); payload.base_url = form.base_url.trim(); payload.model_id = form.model_id.trim();
+        payload.temperature = Number(form.temperature); payload.max_tokens = Number(form.max_tokens); payload.timeout_seconds = Number(form.timeout_seconds);
+        if (form.api_key) payload.api_key = form.api_key;
+      }
       const updated = await api.updateAgent(agent.id, payload);
       dispatch('saved', { agent: { ...updated, tool_ids: agent.tool_ids || [] } });
     } catch (e) { error = e.message || '无法保存 Agent 配置'; }
@@ -212,16 +227,16 @@
 
 <section class="settings" aria-label="Agent 配置">
   <header><div><p>AGENT CONFIG</p><h2>{agent.name}</h2></div><button type="button" class="close" title="关闭配置" aria-label="关闭配置" on:click={requestCancel}>×</button></header>
-  <nav class="tabs" aria-label="Agent 配置页签"><button type="button" class:active={activeTab === 'general'} on:click={() => selectTab('general')}>基础配置</button><button type="button" class:active={activeTab === 'local'} on:click={() => selectTab('local')}>本地执行</button><button type="button" class:active={activeTab === 'governance'} on:click={() => selectTab('governance')}>工具与记忆</button></nav>
+  <nav class="tabs" aria-label="Agent 配置页签"><button type="button" class:active={activeTab === 'general'} on:click={() => selectTab('general')}>基础配置</button><button type="button" class:active={activeTab === 'local'} on:click={() => selectTab('local')}>{isAwc ? 'AWC CLI' : '本地执行'}</button>{#if !isAwc}<button type="button" class:active={activeTab === 'governance'} on:click={() => selectTab('governance')}>工具与记忆</button>{/if}</nav>
   {#if activeTab === 'general'}<form on:submit|preventDefault={save} novalidate>
     <section class="qq-execution"><div class="section-title"><div><h3>QQ Bot 连接</h3><p class="muted">AppSecret 只提交到服务端加密的 QQ Gateway，不会保存到浏览器。</p></div><span class="qq-status" class:connected={qq.status === 'connected'} class:error-status={qq.status === 'error'}>{qqLoading ? '读取中' : qq.status === 'connected' ? '已连接' : qq.status === 'connecting' ? '连接中' : qq.status === 'gateway_unavailable' ? 'Gateway 不可用' : '未连接'}</span></div><div class="two"><label>AppID<input required maxlength="128" bind:value={qqForm.appId} placeholder="QQ 开放平台 AppID" autocomplete="off" /></label><label>AppSecret<input required type="password" maxlength="256" bind:value={qqForm.appSecret} placeholder="QQ 开放平台 AppSecret" autocomplete="new-password" /></label></div><div class="two"><label>Bot ID（可选）<input maxlength="128" bind:value={qqForm.botId} placeholder="留空则连接后自动识别" /></label><label>事件 Intents<input type="number" min="1" max="2147483647" bind:value={qqForm.intents} /></label></div><div class="local-actions"><button type="button" on:click={connectQq} disabled={qqConnecting || qqLoading}>{qqConnecting ? '正在连接...' : '一键连接 QQ Bot'}</button><button type="button" class="danger" on:click={disconnectQq} disabled={qqConnecting || !qq.configured}>断开连接</button></div>{#if qq.bot_id}<p class="muted">已识别 Bot ID：{qq.bot_id}</p>{/if}{#if qq.last_error}<p class="error" role="status">{qq.last_error}</p>{/if}</section>
     <section><div class="section-title"><h3>运行状态</h3><button type="button" class:danger={agent.state === 'active'} on:click={toggleState}>{agent.state === 'active' ? '暂停 Agent' : '恢复 Agent'}</button></div></section>
     <section><h3>基础信息</h3><div class="two"><label>名称<input required maxlength="80" bind:value={form.name} /></label><label>用途<input maxlength="280" bind:value={form.description} /></label></div></section>
-    <section><h3>模型连接</h3><div class="two"><label>连接名称<input required bind:value={form.model_display_name} /></label><label>模型 ID<input required bind:value={form.model_id} /></label></div><label>Base URL<input required type="url" bind:value={form.base_url} /></label><label>替换 API Key<input type="password" autocomplete="new-password" bind:value={form.api_key} placeholder="留空则保持现有密钥" /></label><div class="three"><label>温度<input type="number" min="0" max="2" step="0.1" bind:value={form.temperature} /></label><label>输出 Token<input type="number" min="1" max="32768" bind:value={form.max_tokens} /></label><label>超时（秒）<input type="number" min="5" max="300" bind:value={form.timeout_seconds} /></label></div></section>
+    {#if !isAwc}<section><h3>模型连接</h3><div class="two"><label>连接名称<input required bind:value={form.model_display_name} /></label><label>模型 ID<input required bind:value={form.model_id} /></label></div><label>Base URL<input required type="url" bind:value={form.base_url} /></label><label>替换 API Key<input type="password" autocomplete="new-password" bind:value={form.api_key} placeholder="留空则保持现有密钥" /></label><div class="three"><label>温度<input type="number" min="0" max="2" step="0.1" bind:value={form.temperature} /></label><label>输出 Token<input type="number" min="1" max="32768" bind:value={form.max_tokens} /></label><label>超时（秒）<input type="number" min="5" max="300" bind:value={form.timeout_seconds} /></label></div></section>{/if}
     <section><h3>上下文与预算</h3><div class="three"><label>上下文窗口<input type="number" min="2048" bind:value={form.context_window} /></label><label>并发运行<input type="number" min="1" max="10" bind:value={form.max_concurrent_runs} /></label><label>工具调用上限<input type="number" min="0" max="20" bind:value={form.max_tool_calls} /></label></div><div class="two"><label>每日 Token（0 不限）<input type="number" min="0" bind:value={form.daily_token_budget} /></label><label>每月 Token（0 不限）<input type="number" min="0" bind:value={form.monthly_token_budget} /></label></div><label>系统提示词<textarea required rows="7" maxlength="32000" bind:value={form.system_prompt}></textarea></label></section>
     {#if error}<p class="error" role="status">{error}</p>{/if}
     <footer><button type="button" class="secondary" on:click={requestCancel}>取消</button><button type="submit" disabled={saving}>{saving ? '正在保存...' : '保存配置'}</button></footer>
-  </form>{:else if activeTab === 'local'}<section class="local-execution"><h3>本地设备与工作区</h3><p class="muted">服务端仅保存设备和工作区名称，不保存本机绝对路径。</p><div class="two"><label>配对会话 ID<input bind:value={pairing.id} placeholder="由 local-agent auth login 输出" /></label><label>配对码<input bind:value={pairing.code} placeholder="LA-000000" pattern="LA-[0-9]{6}" /></label></div><button type="button" class="secondary" on:click={approvePairing} disabled={approvingPairing || !pairing.id.trim() || !pairing.code.trim()}>{approvingPairing ? '正在批准...' : '批准本地设备'}</button>{#if loadingLocal}<p class="muted">正在加载...</p>{:else if !devices.length}<p class="muted">批准配对后，设备会出现在此处。</p>{:else}<div class="two"><label>设备<select bind:value={local.deviceId} on:change={selectLocalDevice}><option value="">选择设备</option>{#each devices as device (device.id)}<option value={device.id} disabled={device.status === 'revoked'}>{device.display_name} · {device.platform || 'unknown'} · {device.status}</option>{/each}</select></label><label>工作区<select bind:value={local.workspaceId} disabled={!local.deviceId || !workspaces.length}><option value="">选择工作区</option>{#each workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.display_name} · 策略 v{workspace.policy_version}</option>{/each}</select></label></div><label>模型模式<select bind:value={local.modelMode}><option value="server_proxy">服务端代理模型</option><option value="local_direct">本机直连模型</option></select></label><div class="local-actions"><button type="button" on:click={bindLocal} disabled={bindingLocal || !local.deviceId || !local.workspaceId}>{bindingLocal ? '正在绑定...' : '绑定本地执行'}</button><button type="button" class="danger" on:click={revokeLocalDevice} disabled={bindingLocal || !local.deviceId}>撤销设备</button></div>{#if agent.execution_target === 'local'}<p class="muted">当前 Agent 的新 run 不会进入云端 Worker。</p>{/if}{/if}{#if error}<p class="error" role="status">{error}</p>{/if}</section>{:else}<AgentGovernance {agent} {conversationId} on:updated={event => dispatch('updated', event.detail)} on:dirty={event => governanceDirty = event.detail.tools} />{/if}
+  </form>{:else if activeTab === 'local'}<section class="local-execution"><h3>{isAwc ? 'AWC CLI 连接' : '本地设备与工作区'}</h3><p class="muted">{isAwc ? '模型、API Key 和工具仅由 AWC CLI 本地管理。Web 与 QQ 消息经后端 WebSocket 转发。' : '服务端仅保存设备和工作区名称，不保存本机绝对路径。'}</p>{#if !isAwc}<div class="two"><label>配对会话 ID<input bind:value={pairing.id} placeholder="由 local-agent auth login 输出" /></label><label>配对码<input bind:value={pairing.code} placeholder="LA-000000" pattern="LA-[0-9]{6}" /></label></div><button type="button" class="secondary" on:click={approvePairing} disabled={approvingPairing || !pairing.id.trim() || !pairing.code.trim()}>{approvingPairing ? '正在批准...' : '批准本地设备'}</button>{/if}{#if loadingLocal}<p class="muted">正在加载...</p>{:else if !devices.length}<p class="muted">批准配对后，设备会出现在此处。</p>{:else}<div class="two"><label>设备<select bind:value={local.deviceId} on:change={selectLocalDevice}><option value="">选择设备</option>{#each devices as device (device.id)}<option value={device.id} disabled={device.status === 'revoked' || (isAwc && device.status !== 'online')}>{device.display_name} · {device.platform || 'unknown'} · {device.status}</option>{/each}</select></label><label>工作区<select bind:value={local.workspaceId} disabled={!local.deviceId || !workspaces.length}><option value="">选择工作区</option>{#each workspaces as workspace (workspace.id)}<option value={workspace.id}>{workspace.display_name} · 策略 v{workspace.policy_version}</option>{/each}</select></label></div>{#if isAwc}<label>CLI Profile<input bind:value={local.profile} placeholder="default" /></label>{:else}<label>模型模式<select bind:value={local.modelMode}><option value="server_proxy">服务端代理模型</option><option value="local_direct">本机直连模型</option></select></label>{/if}<div class="local-actions"><button type="button" on:click={isAwc ? bindAwc : bindLocal} disabled={bindingLocal || !local.deviceId || !local.workspaceId || (isAwc && !local.profile?.trim())}>{bindingLocal ? '正在绑定...' : isAwc ? '更新 AWC CLI 绑定' : '绑定本地执行'}</button><button type="button" class="danger" on:click={revokeLocalDevice} disabled={bindingLocal || !local.deviceId}>撤销设备</button></div>{#if isAwc}<p class="muted">CLI 断开 WebSocket 时，Web 和 QQ 都不会创建新的运行。</p>{:else if agent.execution_target === 'local'}<p class="muted">当前 Agent 的新 run 不会进入云端 Worker。</p>{/if}{/if}{#if error}<p class="error" role="status">{error}</p>{/if}</section>{:else}<AgentGovernance {agent} {conversationId} on:updated={event => dispatch('updated', event.detail)} on:dirty={event => governanceDirty = event.detail.tools} />{/if}
 </section>
 
 <style>

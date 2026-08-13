@@ -2427,6 +2427,7 @@ All state-changing operations require structured, authorized tools and are check
         return {
             "run_id": row["run_id"], "lease_id": lease_id, "lease_expires_at": expires_at,
             "workspace_id": context["default_workspace_id"], "agent_id": context["agent_id"],
+            "profile": context["model_id"],
             "system_prompt": context["system_prompt"], "messages": history,
             "max_tokens": context["max_tokens"], "temperature": context["temperature"],
         }
@@ -2540,6 +2541,21 @@ All state-changing operations require structured, authorized tools and are check
                     raise ValueError("server_proxy 需要服务端模型密钥")
                 result = self.db.execute("""UPDATE agents SET execution_target = 'local', default_device_id = ?, default_workspace_id = ?,
                     model_mode = 'server_proxy', current_version = current_version + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?""", (device_id, workspace_id, now(), agent_id, owner_id))
+            self.db.commit()
+        return self.get_agent(agent_id, owner_id, include_private=True) if result.rowcount else None
+
+    def bind_awc_agent(self, agent_id: str, owner_id: int, device_id: str, workspace_id: str, profile: str) -> Optional[Dict[str, Any]]:
+        device = self.get_local_device(device_id, owner_id)
+        workspace = self.get_local_workspace(workspace_id, owner_id)
+        if device is None or device.get("status") != "online" or workspace is None or workspace["device_id"] != device_id:
+            raise ValueError("AWC CLI 未在线或工作区无效")
+        if not profile.strip():
+            raise ValueError("AWC profile 不能为空")
+        with self.lock:
+            result = self.db.execute("""UPDATE agents SET execution_target = 'local', default_device_id = ?, default_workspace_id = ?,
+                model_mode = 'local_direct', model_display_name = 'AWC CLI profile', model_base_url = 'awc://local', model_id = ?,
+                encrypted_api_key = ?, current_version = current_version + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?""",
+                (device_id, workspace_id, profile.strip(), self.cipher.encrypt(b""), now(), agent_id, owner_id))
             self.db.commit()
         return self.get_agent(agent_id, owner_id, include_private=True) if result.rowcount else None
 
@@ -2817,6 +2833,11 @@ All state-changing operations require structured, authorized tools and are check
                 if not device_id or not workspace_id:
                     self.db.rollback()
                     return {"error": "Local Agent 尚未绑定设备和工作区"}
+                if agent["model_base_url"] == "awc://local":
+                    device = self.get_local_device(device_id, owner_id)
+                    if device is None or device.get("status") != "online":
+                        self.db.rollback()
+                        return {"error": "AWC CLI 未通过 WebSocket 连接，无法发送消息"}
                 workspace = self.get_local_workspace(workspace_id, owner_id)
                 if workspace is None or workspace["device_id"] != device_id:
                     self.db.rollback()
@@ -3353,9 +3374,9 @@ class AgentPayload(BaseModel):
     description: str = Field(default="", max_length=280)
     avatar_url: str = Field(default="", max_length=2048)
     model_display_name: str = Field(default="Default connection", min_length=1, max_length=80)
-    base_url: str = Field(min_length=8, max_length=1024)
+    base_url: str = Field(default="", max_length=1024)
     api_key: Optional[str] = Field(default=None, max_length=4096)
-    model_id: str = Field(min_length=1, max_length=160)
+    model_id: str = Field(default="", max_length=160)
     temperature: float = Field(default=0.4, ge=0, le=2)
     max_tokens: int = Field(default=2048, ge=1, le=32768)
     timeout_seconds: int = Field(default=60, ge=5, le=300)
@@ -3433,6 +3454,12 @@ class LocalBindPayload(BaseModel):
     device_id: str = Field(min_length=1, max_length=64)
     workspace_id: str = Field(min_length=1, max_length=64)
     model_mode: str = Field(default="server_proxy", pattern="^(server_proxy|local_direct)$")
+
+
+class AWCBindPayload(BaseModel):
+    device_id: str = Field(min_length=1, max_length=64)
+    workspace_id: str = Field(min_length=1, max_length=64)
+    profile: str = Field(min_length=1, max_length=160)
 
 
 class ConversationPayload(BaseModel):
@@ -3770,10 +3797,21 @@ async def validate_tool(tool_id: str, authorization: Optional[str] = Header(None
 
 @app.post("/api/v1/agents")
 async def create_agent(payload: AgentPayload, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    validate_base_url(payload.base_url)
     user = await authenticated_user(authorization)
     data = payload.model_dump()
     direct = data["execution_target"] == "local" and data["model_mode"] == "local_direct"
+    awc = direct and data["base_url"] == "awc://local"
+    if awc:
+        device_id, workspace_id = data.get("default_device_id"), data.get("default_workspace_id")
+        device = database().get_local_device(device_id or "", user["user_id"])
+        workspace = database().get_local_workspace(workspace_id or "", user["user_id"])
+        if device is None or device.get("status") != "online" or workspace is None or workspace["device_id"] != device_id:
+            raise HTTPException(status_code=409, detail="请先连接在线的 AWC CLI 并选择其工作区")
+        if not data.get("model_id"):
+            raise HTTPException(status_code=400, detail="AWC Agent 需要 CLI profile 名称")
+        data["model_display_name"] = "AWC CLI profile"
+    else:
+        validate_base_url(data["base_url"])
     if direct and data.get("api_key"):
         raise HTTPException(status_code=400, detail="local_direct 的模型密钥只能由本机 daemon 保存")
     if not direct and not data.get("api_key"):
@@ -3931,6 +3969,18 @@ async def bind_local_agent(agent_id: str, payload: LocalBindPayload, authorizati
         agent = database().bind_local_agent(agent_id, user["user_id"], payload.device_id, payload.workspace_id, payload.model_mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent 未找到")
+    return agent
+
+
+@app.post("/api/v1/agents/{agent_id}/awc-bind")
+async def bind_awc_agent(agent_id: str, payload: AWCBindPayload, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    user = await authenticated_user(authorization)
+    try:
+        agent = database().bind_awc_agent(agent_id, user["user_id"], payload.device_id, payload.workspace_id, payload.profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent 未找到")
     return agent

@@ -67,7 +67,7 @@ python -m app.worker
 - 工具按 `read`、`write`、`destructive` 分级。非 `GET`/`HEAD` 不能是 `read`；写操作需确认，破坏性操作逐次确认。
 - 内置工具目录包含高德天气查询（`amap_weather`）；为 Agent 授权该工具即可按城市 adcode 查询，服务端从 `AMAP_WEATHER_API_KEY` 读取密钥，无需导入或配置密钥。
 - Task API 与 `/task/ws` 提供预算受限、上下文隔离的多 Agent 委派；Task run 不能绕过服务端定义的任务工具。
-- `/api/v1/local-agent*` 与 `/local-agent/ws` 用于设备配对、工作区同步和 `local_direct` 派发。当前本地 daemon 仅执行文本模型运行，不支持本机文件/进程工具、工具确认或断线恢复。
+- `/api/v1/local-agent*` 与 `/local-agent/ws` 用于设备配对、工作区同步和 `local_direct` 派发。Web 可分别创建云端 Agent 与 AWC Agent：AWC Agent 必须绑定已通过 WebSocket 在线的 CLI，模型/API Key/profile 仅保存在 CLI；Web 与 QQ Gateway 都经后端把消息转发至该连接。CLI 离线时后端拒绝创建新的 AWC run。当前本地 daemon 仅执行文本模型运行，不支持本机文件/进程工具、工具确认或断线恢复。
 
 敏感模型配置、消息、运行结果和审计原文均以 `AGENT_MASTER_KEY` 加密存储；对外 trace、日志与错误必须使用脱敏载荷，不能暴露提示词、密钥或原始工具响应。
 

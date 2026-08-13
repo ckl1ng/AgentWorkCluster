@@ -1,11 +1,16 @@
 {
-  "name": "local-agent",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@awc/cli",
+  "version": "0.2.0",
+  "description": "Standalone AWC local agent CLI and daemon",
+  "license": "MIT",
+  "private": false,
   "type": "module",
   "bin": {
+    "awc": "bin/awc.js",
     "local-agent": "bin/local-agent.js"
   },
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
   "scripts": {
     "test": "node --test test/*.test.js"
   },

@@ -70,6 +70,21 @@ class LocalAgentStoreTest(unittest.TestCase):
         self.assertEqual(run["local_dispatch"]["device_id"], device["id"])
         self.assertEqual(self.store.pending_outbox_events(), [])
 
+    def test_awc_run_requires_an_online_cli_websocket(self):
+        device = self.store.create_local_device(7, {"display_name": "awc"})
+        workspace = self.store.add_local_workspace(7, device["id"], {"display_name": "project"})
+        awc = self.store.create_agent(7, agent_payload(
+            name="AWC", api_key="", base_url="awc://local", model_id="default",
+            execution_target="local", model_mode="local_direct", default_device_id=device["id"], default_workspace_id=workspace["id"],
+        ))
+        conversation = self.store.create_conversation(awc["id"], 7)
+        self.assertEqual(self.store.create_run(conversation["id"], 7, "offline")["error"], "AWC CLI 未通过 WebSocket 连接，无法发送消息")
+        self.store.set_local_device_status(device["id"], "online")
+        run = self.store.create_run(conversation["id"], 7, "online")
+        self.assertEqual(run["local_dispatch"]["executor_state"], "pending")
+        offer = self.store.offer_local_run(device["id"])
+        self.assertEqual(offer["profile"], "default")
+
     def test_workspace_from_another_device_cannot_be_bound(self):
         first = self.store.create_local_device(7, {"display_name": "first"})
         second = self.store.create_local_device(7, {"display_name": "second"})

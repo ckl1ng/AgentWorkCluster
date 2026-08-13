@@ -1,11 +1,12 @@
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs/promises';
 import { LocalAgentDaemon, defaultPaths } from './daemon.js';
 import { call } from './ipc-client.js';
 import { beginPairing, claimPairing, loadCredential, refreshAccessToken, registerLocalModel, registerWorkspace, removeLocalModel, saveCredential } from './registry-client.js';
 
 function usage() {
-  return `local-agent auth login [--api url] | auth status | daemon | status | workspace add <path> [--name name] | workspace list | model set <agent-id> --base-url url --model-id id [--api-key-env name] | model list | model remove <agent-id> | run <prompt> --workspace id --agent id | run list | run events <id> | run attach <id>`;
+  return `awc init | awc connect pair [--api url] | awc daemon | awc status | awc workspace add <path> [--name name] | awc workspace list | awc profile set <name> --base-url url --model-id id [--api-key-env name] | awc profile list | awc profile remove <name> | awc run <prompt> --workspace id --profile name`;
 }
 
 export async function runCli(argv, { dataDir = path.join(os.homedir(), '.local-agent'), stdout = process.stdout } = {}) {
@@ -30,7 +31,9 @@ export async function runCli(argv, { dataDir = path.join(os.homedir(), '.local-a
     }
     throw new Error('配对码已过期');
   }
-  if (command === 'daemon') { const daemon = await new LocalAgentDaemon(paths).start(); stdout.write(`local-agent daemon listening on ${paths.socket}\n`); const shutdown = async () => { await daemon.stop(); process.exit(0); }; process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown); return daemon; }
+  if (command === 'init') { await fs.mkdir(dataDir, { recursive: true, mode: 0o700 }); return stdout.write(`initialized ${dataDir}\n`); }
+  if (command === 'connect' && subcommand === 'pair') return runCli(['auth', 'login', ...rest], { dataDir, stdout });
+  if (command === 'daemon') { const daemon = await new LocalAgentDaemon(paths).start(); stdout.write(`awc daemon listening on ${paths.socket}\n`); const shutdown = async () => { await daemon.stop(); process.exit(0); }; process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown); return daemon; }
   const request = async (method, params) => call(paths.socket, method, params);
   if (command === 'status') return stdout.write(`${JSON.stringify(await request('daemon.status'), null, 2)}\n`);
   if (command === 'workspace' && subcommand === 'list') return stdout.write(`${JSON.stringify(await request('workspace.list'), null, 2)}\n`);
@@ -45,19 +48,22 @@ export async function runCli(argv, { dataDir = path.join(os.homedir(), '.local-a
     return stdout.write(`${JSON.stringify({ ...result, remote_id: remote.id })}\n`);
   }
   if (command === 'model' && subcommand === 'list') return stdout.write(`${JSON.stringify(await request('model.list'), null, 2)}\n`);
-  if (command === 'model' && subcommand === 'set') {
+  if ((command === 'profile' || command === 'model') && subcommand === 'set') {
     const agentId = rest[0]; const baseUrlIndex = rest.indexOf('--base-url'); const modelIdIndex = rest.indexOf('--model-id'); const keyEnvIndex = rest.indexOf('--api-key-env');
     const keyEnv = keyEnvIndex >= 0 ? rest[keyEnvIndex + 1] : 'LOCAL_AGENT_MODEL_API_KEY'; const apiKey = process.env[keyEnv];
     if (!agentId || baseUrlIndex < 0 || modelIdIndex < 0 || !apiKey) throw new Error('model set requires an agent ID, --base-url, --model-id, and an API key environment variable');
-    const credential = await loadCredential(dataDir); if (!credential) throw new Error('local model credentials require local-agent auth login');
     const result = await request('model.configure', { agent_id: agentId, base_url: rest[baseUrlIndex + 1], model_id: rest[modelIdIndex + 1], api_key: apiKey }); delete process.env[keyEnv];
-    const access = await refreshAccessToken(credential.api_url, credential.refresh_token); await registerLocalModel(credential.api_url, access.access_token, { agent_id: agentId, base_url: result.base_url, model_id: result.model_id });
+    const credential = await loadCredential(dataDir);
+    if (command === 'model' && credential?.refresh_token) { const access = await refreshAccessToken(credential.api_url, credential.refresh_token); await registerLocalModel(credential.api_url, access.access_token, { agent_id: agentId, base_url: result.base_url, model_id: result.model_id }); }
     return stdout.write(`${JSON.stringify(result)}\n`);
   }
-  if (command === 'model' && subcommand === 'remove') {
-    const agentId = rest[0]; if (!agentId) throw new Error('model remove requires an agent ID'); const credential = await loadCredential(dataDir); if (!credential) throw new Error('local model credentials require local-agent auth login');
-    const result = await request('model.remove', { agent_id: agentId }); const access = await refreshAccessToken(credential.api_url, credential.refresh_token); await removeLocalModel(credential.api_url, access.access_token, agentId); return stdout.write(`${JSON.stringify(result)}\n`);
+  if ((command === 'profile' || command === 'model') && subcommand === 'remove') {
+    const agentId = rest[0]; if (!agentId) throw new Error('profile remove requires a profile name');
+    const result = await request('model.remove', { agent_id: agentId }); const credential = await loadCredential(dataDir);
+    if (command === 'model' && credential?.refresh_token) { const access = await refreshAccessToken(credential.api_url, credential.refresh_token); await removeLocalModel(credential.api_url, access.access_token, agentId); }
+    return stdout.write(`${JSON.stringify(result)}\n`);
   }
+  if ((command === 'profile' || command === 'model') && subcommand === 'list') return stdout.write(`${JSON.stringify(await request('model.list'), null, 2)}\n`);
   if (command === 'run' && subcommand === 'list') return stdout.write(`${JSON.stringify(await request('run.list'), null, 2)}\n`);
   if (command === 'run' && subcommand === 'events') return stdout.write(`${JSON.stringify(await request('run.events', { run_id: rest[0] }), null, 2)}\n`);
   if (command === 'run' && subcommand === 'attach') {
@@ -71,8 +77,8 @@ export async function runCli(argv, { dataDir = path.join(os.homedir(), '.local-a
     }
   }
   if (command === 'run') {
-    const workspaceIndex = rest.indexOf('--workspace'); const agentIndex = rest.indexOf('--agent'); const optionValues = new Set([workspaceIndex, workspaceIndex + 1, agentIndex, agentIndex + 1]);
-    const prompt = [subcommand, ...rest.filter((_, index) => !optionValues.has(index))].join(' '); const result = await request('run.create', { prompt, workspace_id: workspaceIndex >= 0 ? rest[workspaceIndex + 1] : undefined, agent_id: agentIndex >= 0 ? rest[agentIndex + 1] : undefined, origin: 'terminal' }); return stdout.write(`${JSON.stringify(result)}\n`);
+    const workspaceIndex = rest.indexOf('--workspace'); const agentIndex = rest.indexOf('--agent'); const profileIndex = rest.indexOf('--profile'); const selectedIndex = agentIndex >= 0 ? agentIndex : profileIndex; const optionValues = new Set([workspaceIndex, workspaceIndex + 1, agentIndex, agentIndex + 1, profileIndex, profileIndex + 1]);
+    const prompt = [subcommand, ...rest.filter((_, index) => !optionValues.has(index))].join(' '); const result = await request('run.create', { prompt, workspace_id: workspaceIndex >= 0 ? rest[workspaceIndex + 1] : undefined, agent_id: selectedIndex >= 0 ? rest[selectedIndex + 1] : undefined, origin: 'terminal' }); return stdout.write(`${JSON.stringify(result)}\n`);
   }
   throw new Error(usage());
 }

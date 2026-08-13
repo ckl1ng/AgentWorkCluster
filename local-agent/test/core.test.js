@@ -17,7 +17,7 @@ import { LocalAgentTransport } from '../src/transport.js';
 async function waitFor(predicate, timeout = 1000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('timed out waiting for condition');
@@ -67,6 +67,25 @@ test('daemon accepts a local model key over IPC without exposing it in status', 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'local-agent-')); const paths = defaultPaths(path.join(dir, 'state')); await saveCredential(paths.dataDir, { device_id: 'device-1', refresh_token: 'device-refresh-secret', api_url: 'http://127.0.0.1:9011' });
   const daemon = await new LocalAgentDaemon(paths).start(); const configured = await call(paths.socket, 'model.configure', { agent_id: 'agent-1', base_url: 'https://model.example/v1', model_id: 'test-model', api_key: 'daemon-only-secret' }); const models = await call(paths.socket, 'model.list');
   assert.equal(configured.agent_id, 'agent-1'); assert.deepEqual(models.map(({ agent_id, configured: ready }) => ({ agent_id, ready })), [{ agent_id: 'agent-1', ready: true }]); assert.doesNotMatch(await fs.readFile(paths.models, 'utf8'), /daemon-only-secret/); await daemon.stop();
+});
+
+test('daemon configures and runs locally without device pairing', async () => {
+  let authorization = '';
+  const server = createServer((request, response) => {
+    authorization = request.headers.authorization || '';
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.end('data: {"choices":[{"delta":{"content":"offline ok"}}]}\n\ndata: [DONE]\n\n');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'local-agent-')); const paths = defaultPaths(path.join(dir, 'state'));
+  const workspace = path.join(dir, 'workspace'); await fs.mkdir(workspace);
+  const daemon = await new LocalAgentDaemon(paths).start(); const added = await call(paths.socket, 'workspace.add', { path: workspace });
+  await call(paths.socket, 'model.configure', { agent_id: 'offline', base_url: `http://127.0.0.1:${address.port}/v1`, model_id: 'test', api_key: 'local-only' });
+  const run = await call(paths.socket, 'run.create', { workspace_id: added.id, agent_id: 'offline', prompt: 'hello' });
+  await waitFor(async () => (await call(paths.socket, 'run.list')).find((item) => item.run_id === run.run_id)?.state === 'completed');
+  assert.equal(authorization, 'Bearer local-only');
+  assert.equal((await call(paths.socket, 'daemon.status')).connected, false);
+  await daemon.stop(); await new Promise((resolve) => server.close(resolve));
 });
 
 test('daemon runs a local model stream and journals sanitized output', async () => {

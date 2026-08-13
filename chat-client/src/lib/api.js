@@ -291,6 +291,10 @@ export const api = {
     return request('POST', `/agents/${agentId}/local-bind`, payload);
   },
 
+  bindAwcAgent(agentId, payload) {
+    return request('POST', `/agents/${agentId}/awc-bind`, payload);
+  },
+
   clearAgentContext(conversationId) {
     return request('POST', `/agent-conversations/${conversationId}/clear-context`);
   },
