@@ -84,6 +84,15 @@ def runtime_system_messages(agent_status: Optional[Dict[str, Any]], system_info:
     return messages
 
 
+def channel_message_content(content: str, scope_type: str, member_name: str, sender_id: str) -> str:
+    """Preserve the sender identity when a QQ group message reaches the model."""
+    content = content.strip()
+    if scope_type == "group":
+        sender = (member_name or sender_id).strip()[:120] or "未知成员"
+        return "{}：{}".format(sender, content)
+    return content
+
+
 def credential_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -2634,6 +2643,7 @@ All state-changing operations require structured, authorized tools and are check
             "id": conversation_id, "agent_id": agent_id, "owner_user_id": owner_id,
             "title": title[:120] or "新会话", "context_epoch": 0,
             "channel_provider": "", "channel_scope_type": "", "channel_scope_id": "",
+            "source": "web",
             "deleted_at": None, "created_at": timestamp, "updated_at": timestamp,
         }
         with self.lock:
@@ -2675,7 +2685,8 @@ All state-changing operations require structured, authorized tools and are check
             return None
         with self.lock:
             rows = self.db.execute("SELECT member_openid, display_name FROM conversation_channel_identities WHERE conversation_id = ? ORDER BY created_at", (conversation_id,)).fetchall()
-        return {"provider": conversation["channel_provider"], "scope_type": conversation["channel_scope_type"], "scope_id": conversation["channel_scope_id"], "members": [{"openid": row["member_openid"], "name": row["display_name"]} for row in rows]}
+        source = "qq_group" if conversation["channel_provider"] == "qq" and conversation["channel_scope_type"] == "group" else ("qq_c2c" if conversation["channel_provider"] == "qq" else "web")
+        return {"provider": conversation["channel_provider"], "scope_type": conversation["channel_scope_type"], "scope_id": conversation["channel_scope_id"], "source": source, "members": [{"openid": row["member_openid"], "name": row["display_name"]} for row in rows]}
 
     def create_schedule(self, agent_id: str, owner_id: int, source_conversation_id: str, run_at: str, prompt: str, idempotency_key: str) -> Dict[str, Any]:
         agent = self.get_agent(agent_id, owner_id)
@@ -2715,10 +2726,13 @@ All state-changing operations require structured, authorized tools and are check
 
     def list_conversations(self, agent_id: str, owner_id: int) -> List[Dict[str, Any]]:
         with self.lock:
-            return [dict(row) for row in self.db.execute(
+            rows = [dict(row) for row in self.db.execute(
                 "SELECT * FROM conversations WHERE agent_id = ? AND owner_user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC",
                 (agent_id, owner_id),
             ).fetchall()]
+        for row in rows:
+            row["source"] = "qq_group" if row.get("channel_provider") == "qq" and row.get("channel_scope_type") == "group" else ("qq_c2c" if row.get("channel_provider") == "qq" else "web")
+        return rows
 
     def set_conversation_channel(self, conversation_id: str, owner_id: int, provider: str,
                                  scope_type: str, scope_id: str) -> bool:
@@ -2736,7 +2750,10 @@ All state-changing operations require structured, authorized tools and are check
                 "SELECT * FROM conversations WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
                 (conversation_id, owner_id),
             ).fetchone()
-        return self._row(row)
+        item = self._row(row)
+        if item is not None:
+            item["source"] = "qq_group" if item.get("channel_provider") == "qq" and item.get("channel_scope_type") == "group" else ("qq_c2c" if item.get("channel_provider") == "qq" else "web")
+        return item
 
     def channel_event_result(self, provider: str, bot_id: str, event_id: str) -> Optional[Dict[str, Any]]:
         with self.lock:
@@ -3646,13 +3663,16 @@ async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authoriz
             database().set_conversation_channel(conversation["id"], payload.owner_user_id, payload.provider, payload.scope_type, payload.scope_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="无法创建 Channel 会话")
-    run = database().create_run(conversation["id"], payload.owner_user_id, payload.content.strip())
+    if payload.provider == "qq":
+        database().update_channel_status(conversation["id"], payload.owner_user_id, payload.sender_id, payload.member_name or payload.sender_id)
+    run = database().create_run(
+        conversation["id"], payload.owner_user_id,
+        channel_message_content(payload.content, payload.scope_type, payload.member_name, payload.sender_id),
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="Channel 会话未找到")
     if run.get("error"):
         raise HTTPException(status_code=409, detail=run["error"])
-    if payload.provider == "qq":
-        database().update_channel_status(conversation["id"], payload.owner_user_id, payload.sender_id, payload.member_name or payload.sender_id)
     try:
         database().remember_channel_event(
             payload.provider, payload.bot_id, payload.event_id, conversation["id"], run["id"], payload.owner_user_id,
