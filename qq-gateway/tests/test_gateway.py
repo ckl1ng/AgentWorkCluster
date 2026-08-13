@@ -21,7 +21,7 @@ os.environ.setdefault("QQ_WEBHOOK_SIGNATURE_MODE", "hmac-sha256")
 from app.main import (
     OP_CALLBACK_VERIFY, OP_DISPATCH, OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HTTP_CALLBACK_ACK,
     OP_IDENTIFY, OP_INVALID_SESSION, OP_RECONNECT, OP_RESUME, OP_HELLO,
-    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, channel_scope_key, heartbeat_payload, identify_payload, normalize_event, register_dispatch_directory, resume_payload, settings, _signature,
+    GatewayStore, QQApiClient, QQConnectionConfig, QQRuntime, channel_scope_key, heartbeat_payload, identify_payload, normalize_event, qq_api_error_summary, register_dispatch_directory, resume_payload, settings, _signature,
 )
 import app.main as gateway_main
 
@@ -99,6 +99,10 @@ class GatewayTest(unittest.TestCase):
             self.assertEqual(captured, {"msg_type": 0, "content": "<@member> reminder"})
             await client.close()
         asyncio.run(exercise())
+
+    def test_qq_api_error_summary_keeps_code_and_message(self):
+        response = httpx.Response(400, json={"code": 22009, "message": "主动消息权限不足"}, request=httpx.Request("POST", "https://qq.test/messages"))
+        self.assertEqual(qq_api_error_summary(response), "QQ API HTTP 400 code=22009 message=主动消息权限不足")
 
     def test_event_claim_prevents_duplicate_work(self):
         with tempfile.TemporaryDirectory() as directory:

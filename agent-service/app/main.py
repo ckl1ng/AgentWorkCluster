@@ -42,6 +42,48 @@ def now_offset(days: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat().replace("+00:00", "Z")
 
 
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def beijing_now() -> str:
+    return datetime.now(BEIJING_TIMEZONE).isoformat()
+
+
+def beijing_time(value: str) -> str:
+    """Render legacy UTC status values in the user-facing Beijing timezone."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(BEIJING_TIMEZONE).isoformat()
+    except (TypeError, ValueError):
+        return value
+
+
+def runtime_system_messages(agent_status: Optional[Dict[str, Any]], system_info: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Build authoritative runtime metadata that must be visible to every model run."""
+    status_time = str((agent_status or {}).get("time") or "")
+    status_updated_at = beijing_time(str((agent_status or {}).get("updated_at") or ""))
+    messages = [{
+        "role": "system",
+        "content": "Agent status (authoritative): current Beijing time (Asia/Shanghai, UTC+08:00) is {}; "
+                   "conversation status time is {}; status last updated at {}. Use Beijing time for all time "
+                   "interpretation, responses, and timer_create arguments. Do not claim that the current time is unavailable."
+                   .format(beijing_now(), status_time or "unavailable", status_updated_at or "unavailable"),
+    }]
+    if system_info and system_info["provider"] == "qq":
+        members = json.dumps(system_info["members"], ensure_ascii=False, separators=(",", ":"))
+        messages.append({
+            "role": "system",
+            "content": "Channel system information: provider=qq; scope_type={}; scope_id={}; observed_members={}. "
+                       "Each observed_members entry maps a display name to the complete QQ OpenID. Use only the "
+                       "matching complete openid when an authorized QQ tool requires an ID. This metadata belongs "
+                       "only to the current conversation."
+                       .format(system_info["scope_type"] or "unknown", system_info["scope_id"] or "unknown", members),
+        })
+    return messages
+
+
 def credential_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -81,7 +123,7 @@ BUILTIN_WEB_SEARCH_ARGS = [os.path.join(os.path.dirname(__file__), "web_search_m
 
 BUILTIN_TOOLS = [
     {
-        "name": "current_time", "description": "获取当前 UTC 时间。", "kind": "local",
+        "name": "current_time", "description": "获取当前北京时间（Asia/Shanghai，UTC+08:00）。", "kind": "local",
         "config": {"builtin": "current_time"},
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
         "confirmation_mode": "none", "side_effect": "read", "provider_version": "local-v1",
@@ -130,8 +172,8 @@ BUILTIN_TOOLS = [
         "confirmation_mode": "none", "side_effect": "write", "provider_version": "qq-autonomy-v1",
     },
     {
-        "name": "timer_create", "description": "在指定 UTC 时刻唤醒当前 Agent 执行提示词。", "kind": "local",
-        "config": {"builtin": "timer_create"}, "input_schema": {"type": "object", "properties": {"run_at": {"type": "string", "format": "date-time"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 50000}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["run_at", "prompt", "idempotency_key"], "additionalProperties": False},
+        "name": "timer_create", "description": "在指定北京时间（Asia/Shanghai，UTC+08:00）唤醒当前 Agent 执行提示词。run_at 必须带 +08:00 时区，例如 2026-08-13T18:30:00+08:00。", "kind": "local",
+        "config": {"builtin": "timer_create"}, "input_schema": {"type": "object", "properties": {"run_at": {"type": "string", "format": "date-time", "description": "北京时间 ISO-8601 时间，必须使用 +08:00 时区"}, "prompt": {"type": "string", "minLength": 1, "maxLength": 50000}, "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}}, "required": ["run_at", "prompt", "idempotency_key"], "additionalProperties": False},
         "confirmation_mode": "none", "side_effect": "write", "provider_version": "agent-schedule-v1",
     },
 ]
@@ -435,8 +477,12 @@ class AgentStore:
                   conversation_id TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT 'user',
                   status_encrypted BLOB NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS conversation_channel_identities (
+                  conversation_id TEXT NOT NULL, member_openid TEXT NOT NULL, display_name TEXT NOT NULL,
+                  created_at TEXT NOT NULL, PRIMARY KEY(conversation_id, member_openid)
+                );
                 CREATE TABLE IF NOT EXISTS agent_schedules (
-                  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL,
+                  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, owner_user_id INTEGER NOT NULL, source_conversation_id TEXT NOT NULL DEFAULT '',
                   run_at TEXT NOT NULL, prompt_encrypted BLOB NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
                   idempotency_key TEXT NOT NULL, last_triggered_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                   UNIQUE(agent_id, owner_user_id, idempotency_key)
@@ -477,6 +523,7 @@ class AgentStore:
             self._ensure_column("conversations", "channel_provider", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("conversations", "channel_scope_type", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("conversations", "channel_scope_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("agent_schedules", "source_conversation_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("agents", "execution_target", "TEXT NOT NULL DEFAULT 'cloud'")
             self._ensure_column("agents", "default_device_id", "TEXT")
             self._ensure_column("agents", "default_workspace_id", "TEXT")
@@ -530,8 +577,8 @@ class AgentStore:
                 if existing:
                     tool_id = existing[0]
                     self.db.execute(
-                        "UPDATE tools SET encrypted_config = ?, provider_version = ?, updated_at = ? WHERE id = ?",
-                        (self._encrypt_json(definition["config"]), definition["provider_version"], now(), tool_id),
+                    "UPDATE tools SET description = ?, kind = ?, encrypted_config = ?, input_schema = ?, confirmation_mode = ?, side_effect = ?, provider_version = ?, updated_at = ? WHERE id = ?",
+                        (definition["description"], definition["kind"], self._encrypt_json(definition["config"]), json.dumps(definition["input_schema"]), definition["confirmation_mode"], definition["side_effect"], definition["provider_version"], now(), tool_id),
                     )
                 else:
                     tool_id = str(uuid.uuid4())
@@ -1905,8 +1952,8 @@ class AgentStore:
             if existing:
                 tool_id = existing[0]
                 self.db.execute(
-                    "UPDATE tools SET encrypted_config = ?, provider_version = ?, updated_at = ? WHERE id = ?",
-                    (self._encrypt_json(definition["config"]), definition["provider_version"], now(), tool_id),
+                    "UPDATE tools SET description = ?, kind = ?, encrypted_config = ?, input_schema = ?, confirmation_mode = ?, side_effect = ?, provider_version = ?, updated_at = ? WHERE id = ?",
+                    (definition["description"], definition["kind"], self._encrypt_json(definition["config"]), json.dumps(definition["input_schema"]), definition["confirmation_mode"], definition["side_effect"], definition["provider_version"], now(), tool_id),
                 )
             else:
                 timestamp = now()
@@ -2111,6 +2158,7 @@ class AgentStore:
             tool["config"] = self._decrypt_json(row[0])
             tool["_agent_id"] = snapshot["id"]
             tool["_owner_user_id"] = owner_id
+            tool["_conversation_id"] = self.db.execute("SELECT conversation_id FROM runs WHERE id = ?", (run_id,)).fetchone()[0]
         snapshot["tools"] = tools
         self.db.execute("INSERT INTO run_snapshots VALUES (?, ?, ?)", (run_id, self._encrypt_json(snapshot), now()))
 
@@ -2579,7 +2627,7 @@ All state-changing operations require structured, authorized tools and are check
             )
             self.db.execute(
                 "INSERT INTO agent_status (conversation_id, source, status_encrypted, updated_at) VALUES (?, 'user', ?, ?)",
-                (conversation_id, self._encrypt_json({"time": timestamp, "group_members": []}), timestamp),
+                (conversation_id, self._encrypt_json({"time": beijing_time(timestamp)}), timestamp),
             )
             self.db.commit()
         return conversation
@@ -2590,45 +2638,52 @@ All state-changing operations require structured, authorized tools and are check
         with self.lock:
             row = self.db.execute("SELECT source, status_encrypted, updated_at FROM agent_status WHERE conversation_id = ?", (conversation_id,)).fetchone()
         if row is None:
-            return {"source": "user", "time": "", "group_members": [], "updated_at": ""}
+            return {"source": "user", "time": "", "updated_at": ""}
         status = self._decrypt_json(row["status_encrypted"])
-        return {"source": row["source"], "time": str(status.get("time") or ""), "group_members": list(status.get("group_members") or []), "updated_at": row["updated_at"]}
+        return {"source": row["source"], "time": beijing_time(str(status.get("time") or "")), "updated_at": row["updated_at"]}
 
-    def update_channel_status(self, conversation_id: str, owner_id: int, member_name: str) -> None:
+    def update_channel_status(self, conversation_id: str, owner_id: int, member_openid: str, member_name: str) -> None:
+        member_openid = member_openid.strip()[:256]
         member_name = member_name.strip()[:120]
-        if not member_name:
+        if not member_openid:
             return
         timestamp = now()
         with self.lock:
-            row = self.db.execute("SELECT status_encrypted FROM agent_status WHERE conversation_id = ?", (conversation_id,)).fetchone()
-            status = self._decrypt_json(row["status_encrypted"]) if row else {"time": timestamp, "group_members": []}
-            members = [str(item)[:120] for item in status.get("group_members", []) if str(item).strip()]
-            if member_name not in members:
-                members.append(member_name)
-            status = {"time": timestamp, "group_members": members}
-            self.db.execute("INSERT INTO agent_status (conversation_id, source, status_encrypted, updated_at) VALUES (?, 'user', ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET source = 'user', status_encrypted = excluded.status_encrypted, updated_at = excluded.updated_at", (conversation_id, self._encrypt_json(status), timestamp))
+            self.db.execute("INSERT INTO conversation_channel_identities (conversation_id, member_openid, display_name, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(conversation_id, member_openid) DO NOTHING", (conversation_id, member_openid, member_name or member_openid, timestamp))
+            self.db.execute("INSERT INTO agent_status (conversation_id, source, status_encrypted, updated_at) VALUES (?, 'user', ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET source = 'user', status_encrypted = excluded.status_encrypted, updated_at = excluded.updated_at", (conversation_id, self._encrypt_json({"time": beijing_time(timestamp)}), timestamp))
             self.db.commit()
 
-    def create_schedule(self, agent_id: str, owner_id: int, run_at: str, prompt: str, idempotency_key: str) -> Dict[str, Any]:
+    def conversation_system_info(self, conversation_id: str, owner_id: int) -> Optional[Dict[str, Any]]:
+        conversation = self.get_conversation(conversation_id, owner_id)
+        if conversation is None:
+            return None
+        with self.lock:
+            rows = self.db.execute("SELECT member_openid, display_name FROM conversation_channel_identities WHERE conversation_id = ? ORDER BY created_at", (conversation_id,)).fetchall()
+        return {"provider": conversation["channel_provider"], "scope_type": conversation["channel_scope_type"], "scope_id": conversation["channel_scope_id"], "members": [{"openid": row["member_openid"], "name": row["display_name"]} for row in rows]}
+
+    def create_schedule(self, agent_id: str, owner_id: int, source_conversation_id: str, run_at: str, prompt: str, idempotency_key: str) -> Dict[str, Any]:
         agent = self.get_agent(agent_id, owner_id)
         if agent is None:
             raise ValueError("Agent 未找到")
+        source_conversation = self.get_conversation(source_conversation_id, owner_id)
+        if source_conversation is None or source_conversation["agent_id"] != agent_id:
+            raise ValueError("定时任务来源会话无效")
         try:
             parsed = datetime.fromisoformat(run_at.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
+            if parsed.tzinfo is None or parsed.utcoffset() != timedelta(hours=8):
                 raise ValueError
-            run_at = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            run_at_utc = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         except ValueError as exc:
-            raise ValueError("run_at 必须是带时区的 ISO-8601 时间") from exc
+            raise ValueError("run_at 必须是带 +08:00 时区的北京时间 ISO-8601 时间") from exc
         timestamp = now()
-        record = {"id": str(uuid.uuid4()), "agent_id": agent_id, "owner_user_id": owner_id, "run_at": run_at, "prompt_encrypted": self._encrypt_text(prompt), "idempotency_key": idempotency_key, "created_at": timestamp, "updated_at": timestamp}
+        record = {"id": str(uuid.uuid4()), "agent_id": agent_id, "owner_user_id": owner_id, "source_conversation_id": source_conversation_id, "run_at": run_at_utc, "prompt_encrypted": self._encrypt_text(prompt), "idempotency_key": idempotency_key, "created_at": timestamp, "updated_at": timestamp}
         with self.lock:
             existing = self.db.execute("SELECT * FROM agent_schedules WHERE agent_id = ? AND owner_user_id = ? AND idempotency_key = ?", (agent_id, owner_id, idempotency_key)).fetchone()
             if existing is not None:
-                return {"id": existing["id"], "run_at": existing["run_at"], "enabled": bool(existing["enabled"]), "duplicate": True}
-            self.db.execute("INSERT INTO agent_schedules (id, agent_id, owner_user_id, run_at, prompt_encrypted, enabled, idempotency_key, last_triggered_at, created_at, updated_at) VALUES (:id, :agent_id, :owner_user_id, :run_at, :prompt_encrypted, 1, :idempotency_key, NULL, :created_at, :updated_at)", record)
+                return {"id": existing["id"], "run_at": beijing_time(existing["run_at"]), "enabled": bool(existing["enabled"]), "duplicate": True}
+            self.db.execute("INSERT INTO agent_schedules (id, agent_id, owner_user_id, source_conversation_id, run_at, prompt_encrypted, enabled, idempotency_key, last_triggered_at, created_at, updated_at) VALUES (:id, :agent_id, :owner_user_id, :source_conversation_id, :run_at, :prompt_encrypted, 1, :idempotency_key, NULL, :created_at, :updated_at)", record)
             self.db.commit()
-        return {"id": record["id"], "run_at": run_at, "enabled": True, "duplicate": False}
+        return {"id": record["id"], "run_at": beijing_time(run_at_utc), "enabled": True, "duplicate": False}
 
     def claim_due_schedules(self, limit: int = 20) -> List[Dict[str, Any]]:
         timestamp = now()
@@ -2702,7 +2757,7 @@ All state-changing operations require structured, authorized tools and are check
         for message in messages:
             encrypted = message.pop("content_encrypted", None)
             message["content"] = self._decrypt_text(encrypted) if encrypted else message.get("content", "")
-        return {"conversation": conversation, "messages": messages, "agent_status": self.conversation_status(conversation_id, owner_id)}
+        return {"conversation": conversation, "messages": messages, "agent_status": self.conversation_status(conversation_id, owner_id), "system_info": self.conversation_system_info(conversation_id, owner_id)}
 
     def create_run(self, conversation_id: str, owner_id: int, content: str, task_id: Optional[str] = None,
                    assignment_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -3037,11 +3092,36 @@ All state-changing operations require structured, authorized tools and are check
         return updated
 
     def delete_conversation(self, conversation_id: str, owner_id: int) -> bool:
+        """Permanently erase a non-task conversation and every conversation-scoped record."""
         with self.lock:
-            result = self.db.execute(
-                "UPDATE conversations SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL",
-                (now(), now(), conversation_id, owner_id),
-            )
+            conversation = self.db.execute(
+                "SELECT id FROM conversations WHERE id = ? AND owner_user_id = ?", (conversation_id, owner_id),
+            ).fetchone()
+            if conversation is None:
+                return False
+            active = self.db.execute(
+                "SELECT 1 FROM runs WHERE conversation_id = ? AND state IN ('queued', 'running', 'waiting_confirmation') LIMIT 1", (conversation_id,),
+            ).fetchone()
+            if active is not None:
+                raise ValueError("会话仍有运行中的任务，无法彻底删除")
+            task_link = self.db.execute("SELECT 1 FROM tasks WHERE conversation_id = ? LIMIT 1", (conversation_id,)).fetchone()
+            if task_link is not None:
+                raise ValueError("Task 关联会话必须保留审计记录，无法彻底删除")
+            run_rows = self.db.execute("SELECT id FROM runs WHERE conversation_id = ?", (conversation_id,)).fetchall()
+            run_ids = [row["id"] for row in run_rows]
+            for run_id in run_ids:
+                self.db.execute("DELETE FROM local_run_dispatches WHERE run_id = ?", (run_id,))
+                self.db.execute("DELETE FROM tool_invocations WHERE run_id = ?", (run_id,))
+                self.db.execute("DELETE FROM tool_confirmations WHERE run_id = ?", (run_id,))
+                self.db.execute("DELETE FROM trace_events WHERE run_id = ?", (run_id,))
+                self.db.execute("DELETE FROM run_snapshots WHERE run_id = ?", (run_id,))
+            self.db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            self.db.execute("DELETE FROM runs WHERE conversation_id = ?", (conversation_id,))
+            self.db.execute("DELETE FROM agent_status WHERE conversation_id = ?", (conversation_id,))
+            self.db.execute("DELETE FROM conversation_channel_identities WHERE conversation_id = ?", (conversation_id,))
+            self.db.execute("DELETE FROM memory_items WHERE owner_user_id = ? AND scope_type = 'conversation' AND scope_id = ?", (owner_id, conversation_id))
+            self.db.execute("DELETE FROM channel_event_deduplications WHERE conversation_id = ?", (conversation_id,))
+            result = self.db.execute("DELETE FROM conversations WHERE id = ? AND owner_user_id = ?", (conversation_id, owner_id))
             self.db.commit()
         return result.rowcount > 0
 
@@ -3544,8 +3624,8 @@ async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authoriz
         raise HTTPException(status_code=404, detail="Channel 会话未找到")
     if run.get("error"):
         raise HTTPException(status_code=409, detail=run["error"])
-    if payload.provider == "qq" and payload.scope_type == "group":
-        database().update_channel_status(conversation["id"], payload.owner_user_id, payload.member_name or payload.sender_id)
+    if payload.provider == "qq":
+        database().update_channel_status(conversation["id"], payload.owner_user_id, payload.sender_id, payload.member_name or payload.sender_id)
     try:
         database().remember_channel_event(
             payload.provider, payload.bot_id, payload.event_id, conversation["id"], run["id"], payload.owner_user_id,
@@ -4295,7 +4375,11 @@ async def clear_context(conversation_id: str, authorization: Optional[str] = Hea
 @app.delete("/api/v1/agent-conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, authorization: Optional[str] = Header(None)) -> Dict[str, bool]:
     user = await authenticated_user(authorization)
-    if not database().delete_conversation(conversation_id, user["user_id"]):
+    try:
+        deleted = database().delete_conversation(conversation_id, user["user_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="会话未找到")
     return {"deleted": True}
 
@@ -4359,7 +4443,8 @@ async def execute_autonomy_tool(tool: Dict[str, Any], arguments: Dict[str, Any])
     if not context_agent_id or context_owner_id < 1:
         raise RuntimeError("自主工具缺少运行身份")
     if builtin == "timer_create":
-        return {"status": "ok", **database().create_schedule(context_agent_id, context_owner_id, arguments["run_at"], arguments["prompt"], arguments["idempotency_key"])}
+        source_conversation_id = str(tool.get("_conversation_id") or "")
+        return {"status": "ok", **database().create_schedule(context_agent_id, context_owner_id, source_conversation_id, arguments["run_at"], arguments["prompt"], arguments["idempotency_key"])}
     if builtin == "qq_list_groups":
         return await qq_gateway_request("GET", "/internal/v1/qq/groups/" + context_agent_id)
     if builtin == "qq_list_group_members":
@@ -4449,7 +4534,9 @@ async def schedule_loop() -> None:
     while True:
         try:
             for schedule in database().claim_due_schedules():
-                conversation = database().create_conversation(schedule["agent_id"], int(schedule["owner_user_id"]), "自主定时任务")
+                conversation = database().get_conversation(schedule.get("source_conversation_id", ""), int(schedule["owner_user_id"]))
+                if conversation is None or conversation["agent_id"] != schedule["agent_id"]:
+                    conversation = database().create_conversation(schedule["agent_id"], int(schedule["owner_user_id"]), "自主定时任务")
                 if conversation is None:
                     continue
                 run = database().create_run(conversation["id"], int(schedule["owner_user_id"]), database()._decrypt_text(schedule["prompt_encrypted"]))
@@ -4496,10 +4583,8 @@ async def orchestrate_run(run_id: str, recover: bool = False, resume_confirmatio
     await emit(run_id, "agent.run.started", {"summary": "恢复运行" if recover else "开始调用模型"})
     task_history = database().task_run_messages(run_id)
     history = task_history if task_history is not None else database().model_messages(context["conversation_id"], context["context_epoch"])
-    status = database().conversation_status(context["conversation_id"], int(context["initiated_by_user_id"]))
-    if status is not None:
-        members = "、".join(str(item) for item in status["group_members"]) or "无"
-        history = [*history, {"role": "user", "content": "[会话状态栏 | 来源:user] 时间: {}；当前群会话已出现成员: {}。此状态仅属于当前会话。".format(status["time"] or now(), members)}]
+    agent_status = database().conversation_status(context["conversation_id"], int(context["initiated_by_user_id"]))
+    system_info = database().conversation_system_info(context["conversation_id"], int(context["initiated_by_user_id"]))
     policy = context.get("run_policy") or {}
     if isinstance(policy, str):
         policy = json.loads(policy)
@@ -4521,6 +4606,7 @@ async def orchestrate_run(run_id: str, recover: bool = False, resume_confirmatio
     messages, manifest = prepare_context(
         context["system_prompt"], history, policy, int(context["max_tokens"]), len(declarations), declaration_tokens, memories
     )
+    messages[1:1] = runtime_system_messages(agent_status, system_info)
     await emit(run_id, "agent.context.prepared", {
         "message_count": len(messages), "estimated_input_tokens": manifest["estimated_input_tokens"],
         "history_dropped": manifest["history_dropped"], "memory_count": manifest["memory_count"], "summary": "已按预算准备当前上下文",

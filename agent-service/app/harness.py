@@ -6,6 +6,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -474,7 +475,12 @@ async def execute_local_tool(
     _validate_arguments(tool, arguments)
     config = tool.get("config") or {}
     if config.get("builtin") == "current_time":
-        return {"status": "ok", "content": json.dumps({"unix": int(time.time()), "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})}
+        beijing = timezone(timedelta(hours=8))
+        return {"status": "ok", "content": json.dumps({
+            "unix": int(time.time()),
+            "iso": datetime.now(beijing).isoformat(),
+            "timezone": "Asia/Shanghai",
+        })}
     command = config.get("command")
     args = config.get("args") or []
     if not isinstance(command, str) or not command.strip() or not isinstance(args, list) or any(not isinstance(item, str) for item in args):

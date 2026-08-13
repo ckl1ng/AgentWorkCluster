@@ -263,6 +263,10 @@ export const api = {
     return request('GET', `/agent-conversations/${conversationId}`);
   },
 
+  deleteAgentConversation(conversationId) {
+    return request('DELETE', `/agent-conversations/${conversationId}`);
+  },
+
   createAgentRun(conversationId, content) {
     return request('POST', `/agent-conversations/${conversationId}/runs`, { content }, { timeout: 30000 });
   },

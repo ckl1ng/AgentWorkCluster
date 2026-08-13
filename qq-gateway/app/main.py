@@ -42,10 +42,35 @@ OP_HTTP_CALLBACK_ACK = 12
 OP_CALLBACK_VERIFY = 13
 
 event_logger = logging.getLogger("qq_gateway.events")
+proactive_logger = logging.getLogger("qq_gateway.proactive")
 
 
 def _now() -> float:
     return time.time()
+
+
+def qq_api_error_summary(response: httpx.Response) -> str:
+    """Keep actionable QQ error metadata without logging message content or tokens."""
+    code = ""
+    message = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            code = str(body.get("code") or body.get("err_code") or "")[:80]
+            message = str(body.get("message") or body.get("msg") or body.get("error") or "")[:300]
+    except (ValueError, TypeError):
+        pass
+    details = "QQ API HTTP {}".format(response.status_code)
+    if code:
+        details += " code={}".format(code)
+    if message:
+        details += " message={}".format(message)
+    return details
+
+
+def log_proactive(stage: str, **fields: Any) -> None:
+    """Structured audit trail for proactive delivery; intentionally excludes content and credentials."""
+    proactive_logger.info("qq_proactive %s", json.dumps({"stage": stage, **fields}, separators=(",", ":"), ensure_ascii=False))
 
 
 class Settings:
@@ -462,14 +487,17 @@ class QQApiClient:
         for attempt in range(3):
             token = await self.access_token(force=attempt > 0 and last_error == "401")
             response = await self.client.post(url, headers={"Authorization": "QQBot " + token}, json=payload)
+            summary = qq_api_error_summary(response) if response.status_code >= 400 else ""
+            log_proactive("provider_response", group_openid=group_openid, member_openid=member_openid, attempt=attempt + 1, http_status=response.status_code, error=summary)
             if response.status_code == 401:
                 last_error = "401"
                 continue
             if response.status_code == 429 or response.status_code >= 500:
-                last_error = "QQ API HTTP {}".format(response.status_code)
+                last_error = summary
                 await asyncio.sleep(min(4.0, 0.5 * (2 ** attempt)))
                 continue
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise RuntimeError(summary)
             body = response.json() if response.content else {}
             return str(body.get("id", body.get("message_id", "")))
         raise RuntimeError(last_error or "QQ proactive message send failed")
@@ -1086,17 +1114,23 @@ async def send_proactive_message(request: Request, authorization: Optional[str] 
     if member_openid and not store.has_group_member(agent_id, group_openid, member_openid):
         raise HTTPException(status_code=404, detail="目标 QQ 群成员未登记")
     status, delivery_id = store.claim_proactive(agent_id, group_openid, member_openid, idempotency_key)
+    log_proactive("claimed", delivery_id=delivery_id, agent_id=agent_id, group_openid=group_openid, member_openid=member_openid, idempotency_key=idempotency_key, status=status)
     if status == "sent":
+        log_proactive("duplicate_sent", delivery_id=delivery_id, agent_id=agent_id, group_openid=group_openid)
         return {"delivery_id": delivery_id, "status": "sent", "duplicate": True}
     if status == "sending":
+        log_proactive("duplicate_inflight", delivery_id=delivery_id, agent_id=agent_id, group_openid=group_openid)
         return {"delivery_id": delivery_id, "status": "sending", "duplicate": True}
     try:
         message_id = await runtime.api.send_proactive_group_message(group_openid, content, member_openid)
         store.complete_proactive(delivery_id, message_id)
+        log_proactive("sent", delivery_id=delivery_id, agent_id=agent_id, group_openid=group_openid, provider_message_id=message_id)
         return {"delivery_id": delivery_id, "status": "sent", "message_id": message_id}
     except Exception as exc:
-        store.fail_proactive(delivery_id, str(exc))
-        raise HTTPException(status_code=502, detail="QQ 主动消息发送失败") from exc
+        error = str(exc)[:500]
+        store.fail_proactive(delivery_id, error)
+        log_proactive("failed", delivery_id=delivery_id, agent_id=agent_id, group_openid=group_openid, error=error)
+        raise HTTPException(status_code=502, detail="QQ 主动消息发送失败：" + error) from exc
 
 
 @app.post("/qq/webhook/{bot_id}")

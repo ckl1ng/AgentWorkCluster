@@ -26,7 +26,8 @@
   let confirmation = null;
   let confirmationBusy = false;
   let localDevice = null;
-  let agentStatus = { source: 'user', time: '', group_members: [] };
+  let agentStatus = { source: 'user', time: '' };
+  let systemInfo = { provider: '', scope_type: '', scope_id: '', members: [] };
 
   onMount(load);
   onDestroy(() => socket?.disconnect());
@@ -36,7 +37,9 @@
     try {
       agent = await api.getAgent(agentId);
       await loadLocalDevice();
-      conversations = (await api.listAgentConversations(agentId)).filter(item => !item.channel_provider);
+      // Keep QQ channel conversations visible so their group/member context can
+      // be inspected alongside ordinary and autonomous conversations.
+      conversations = await api.listAgentConversations(agentId);
       conversation = conversations[0] || await api.createAgentConversation(agentId);
       if (!conversations.some(item => item.id === conversation.id)) conversations = [conversation, ...conversations];
       await loadConversation();
@@ -64,7 +67,8 @@
     if (!conversation) return;
     const data = await api.getAgentConversation(conversation.id);
     conversation = data.conversation;
-    agentStatus = data.agent_status || { source: 'user', time: '', group_members: [] };
+    agentStatus = data.agent_status || { source: 'user', time: '' };
+    systemInfo = data.system_info || { provider: '', scope_type: '', scope_id: '', members: [] };
     // Tool responses are context records, not chat bubbles. Keep this guard for
     // compatibility with older Agent API instances that still return role=tool.
     messageList = data.messages.filter(message => message.role === 'user' || message.role === 'assistant');
@@ -207,12 +211,31 @@
       conversations = [conversation, ...conversations];
       messageList = [];
       traces = {};
-      agentStatus = { source: 'user', time: '', group_members: [] };
+      agentStatus = { source: 'user', time: '' };
+      systemInfo = { provider: '', scope_type: '', scope_id: '', members: [] };
       error = '';
       await tick();
       scrollBottom();
     }
     catch (e) { error = e.message || '无法创建会话'; }
+  }
+
+  async function deleteConversation() {
+    if (!conversation || runningRunId) return;
+    if (!confirm(`彻底删除「${conversation.title || '此会话'}」及其中所有消息、运行记录、工具轨迹和会话记忆？此操作无法恢复。`)) return;
+    const deletedId = conversation.id;
+    try {
+      await api.deleteAgentConversation(deletedId);
+      conversations = conversations.filter(item => item.id !== deletedId);
+      conversation = conversations[0] || await api.createAgentConversation(agentId);
+      if (!conversations.some(item => item.id === conversation.id)) conversations = [conversation, ...conversations];
+      messageList = [];
+      traces = {};
+      agentStatus = { source: 'user', time: '' };
+      systemInfo = { provider: '', scope_type: '', scope_id: '', members: [] };
+      error = '';
+      await loadConversation();
+    } catch (e) { error = e.message || '无法彻底删除会话'; }
   }
 
   async function selectConversation(next) {
@@ -221,7 +244,8 @@
     conversation = next;
     messageList = [];
     traces = {};
-    agentStatus = { source: 'user', time: '', group_members: [] };
+    agentStatus = { source: 'user', time: '' };
+    systemInfo = { provider: '', scope_type: '', scope_id: '', members: [] };
     confirmation = null;
     error = '';
     await loadConversation();
@@ -314,7 +338,7 @@
 {:else}
 <section class="agent-chat">
   <aside class="conversation-sidebar" aria-label="Agent 会话">
-    <div class="conversation-sidebar-heading"><span>会话</span><button type="button" title="新建会话" aria-label="新建会话" on:click={newConversation} disabled={!!runningRunId}>＋</button></div>
+    <div class="conversation-sidebar-heading"><span>会话</span><div><button type="button" class="conversation-delete" title="彻底删除当前会话" aria-label="彻底删除当前会话" on:click={deleteConversation} disabled={!!runningRunId || !conversation}>×</button><button type="button" title="新建会话" aria-label="新建会话" on:click={newConversation} disabled={!!runningRunId}>＋</button></div></div>
     <div class="conversation-items">
       {#each conversations as item (item.id)}
         <button class:active={item.id === conversation?.id} type="button" on:click={() => selectConversation(item)} disabled={!!runningRunId} title={item.title}>{item.title || '新会话'}</button>
@@ -330,6 +354,11 @@
     <div class="toolbar-actions"><button type="button" title="清空当前上下文" on:click={clearContext} disabled={!!runningRunId}>清空上下文</button><button type="button" on:click={() => runsOpen = true}>运行记录</button>{#if agent?.is_owner}<button type="button" on:click={() => settingsOpen = true} disabled={!!runningRunId}>配置</button><button class="delete" type="button" title="删除 Agent" on:click={deleteAgent} disabled={!!runningRunId}>删除</button>{/if}</div>
   </div>
   <div class="messages" bind:this={messageListEl}>
+    {#if systemInfo.provider === 'qq'}
+      <aside class="system-info" aria-label="QQ 会话系统信息">
+        <span>System</span><div><strong>QQ {systemInfo.scope_type || '会话'}</strong><p>{systemInfo.scope_type === 'group' ? '群标识' : '用户标识'}：{systemInfo.scope_id || '未知'}</p><p>已观察成员：{systemInfo.members?.length ? systemInfo.members.map(member => `${member.name} (${member.openid})`).join('、') : '暂无'}</p></div>
+      </aside>
+    {/if}
     {#if loading}<p class="status">正在加载 Agent...</p>
     {:else if error && !messageList.length}<p class="status error">{error}</p>
     {:else if !messageList.length}<p class="status">发送第一条消息以开始运行</p>{/if}
@@ -376,8 +405,7 @@
     {/each}
     <aside class="agent-status" aria-label="会话状态栏">
       <div><span>状态来源</span><strong>{agentStatus.source || 'user'}</strong></div>
-      <div><span>时间</span><time>{agentStatus.time ? new Date(agentStatus.time).toLocaleString() : '未更新'}</time></div>
-      <div><span>群成员</span><p>{agentStatus.group_members?.length ? agentStatus.group_members.join('、') : '暂无'}</p></div>
+      <div><span>北京时间</span><time>{agentStatus.time ? new Date(agentStatus.time).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '未更新'}</time></div>
     </aside>
   </div>
   {#if confirmation}<ToolConfirmation {confirmation} busy={confirmationBusy} on:decide={decideConfirmation} />{/if}
@@ -389,15 +417,15 @@
 
 <style>
   .agent-chat { flex: 1; display: flex; min-width: 0; min-height: 0; }
-  .conversation-sidebar { display:flex; flex:0 0 178px; min-width:0; flex-direction:column; border-right:1px solid var(--color-border); background:var(--color-surface); }.conversation-sidebar-heading { display:flex; min-height:44px; align-items:center; justify-content:space-between; padding:0 10px 0 14px; border-bottom:1px solid var(--color-border); color:var(--color-text-muted); font-size:12px; font-weight:700; }.conversation-sidebar-heading button { display:grid; width:26px; height:26px; place-items:center; min-height:0; padding:0; font-size:17px; }.conversation-items { display:grid; gap:2px; overflow:auto; padding:7px; }.conversation-items button { width:100%; overflow:hidden; margin:0; padding:7px 8px; border-color:transparent; color:var(--color-text-muted); text-align:left; text-overflow:ellipsis; white-space:nowrap; }.conversation-items button.active { border-color:var(--color-primary); background:var(--color-active); color:var(--color-primary); }.conversation-main { display:flex; flex:1; min-width:0; flex-direction:column; }
+  .conversation-sidebar { display:flex; flex:0 0 178px; min-width:0; flex-direction:column; border-right:1px solid var(--color-border); background:var(--color-surface); }.conversation-sidebar-heading { display:flex; min-height:44px; align-items:center; justify-content:space-between; padding:0 10px 0 14px; border-bottom:1px solid var(--color-border); color:var(--color-text-muted); font-size:12px; font-weight:700; }.conversation-sidebar-heading > div { display:flex; gap:4px; }.conversation-sidebar-heading button { display:grid; width:26px; height:26px; place-items:center; min-height:0; padding:0; font-size:17px; }.conversation-sidebar-heading .conversation-delete { color:var(--color-error); font-size:20px; }.conversation-items { display:grid; gap:2px; overflow:auto; padding:7px; }.conversation-items button { width:100%; overflow:hidden; margin:0; padding:7px 8px; border-color:transparent; color:var(--color-text-muted); text-align:left; text-overflow:ellipsis; white-space:nowrap; }.conversation-items button.active { border-color:var(--color-primary); background:var(--color-active); color:var(--color-primary); }.conversation-main { display:flex; flex:1; min-width:0; flex-direction:column; }
   .agent-toolbar { display: flex; align-items: center; min-height: 44px; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }.agent-avatar, .message-avatar { display: grid; width: 32px; height: 32px; place-items: center; flex: 0 0 32px; overflow: hidden; border: 1px solid var(--color-border); border-radius: 50%; background: var(--color-avatar); color: var(--color-avatar-text); font-size: 12px; font-weight: 700; }.agent-avatar img, .message-avatar img { width: 100%; height: 100%; object-fit: cover; }.message-avatar.user { background: var(--color-group-avatar); color: var(--color-group-avatar-text); }
   .state,.local-state { padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--color-online) 55%, var(--color-border)); border-radius: 4px; color: var(--color-online); font-size: 11px; font-weight: 700; }.state.paused,.local-state.offline { color: var(--color-error); border-color: var(--color-error); }
   .agent-purpose { overflow: hidden; flex: 1; color: var(--color-text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.toolbar-actions { display: flex; gap: 6px; }.toolbar-actions .delete { color: var(--color-error); }
   button { min-height: 30px; padding: 0 9px; border: 1px solid var(--color-border); border-radius: 4px; background: transparent; color: var(--color-text-muted); cursor: pointer; font-size: 12px; } button:hover:not(:disabled) { border-color: var(--color-primary); color: var(--color-primary); } button:disabled { opacity: .5; cursor: default; }
   .messages { flex: 1; overflow-y: auto; padding: 18px 0; }.status { display: grid; min-height: 180px; place-items: center; color: var(--color-text-muted); font-size: 13px; }.status.error, .run-error { color: var(--color-error); }
-  .agent-status { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:12px; margin:24px max(16px, 7vw) 4px; padding:10px 12px; border-top:1px solid var(--color-border); color:var(--color-text-muted); font-size:11px; }.agent-status div { min-width:0; }.agent-status span { display:block; margin-bottom:3px; font-size:10px; }.agent-status strong,.agent-status time,.agent-status p { color:var(--color-text); font:inherit; overflow-wrap:anywhere; }.agent-status p { margin:0; }
+  .system-info { display:flex; gap:10px; margin:0 max(16px, 7vw) 18px; padding:10px 12px; border:1px solid var(--color-border); border-left:3px solid var(--color-primary); border-radius:5px; background:var(--color-input); color:var(--color-text-muted); font-size:11px; }.system-info > span { flex:0 0 auto; color:var(--color-primary); font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:uppercase; }.system-info strong { color:var(--color-text); }.system-info p { margin:4px 0 0; overflow-wrap:anywhere; }.agent-status { display:flex; gap:28px; margin:24px max(16px, 7vw) 4px; padding:10px 12px; border-top:1px solid var(--color-border); color:var(--color-text-muted); font-size:11px; }.agent-status div { min-width:0; }.agent-status span { display:block; margin-bottom:3px; font-size:10px; }.agent-status strong,.agent-status time { color:var(--color-text); font:inherit; overflow-wrap:anywhere; }
   .message-row { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 12px; padding: 0 max(16px, 7vw); }.message-row.user { flex-direction: row-reverse; }.message { max-width: min(780px, 78%); padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); border-radius: 8px; border-top-left-radius: 2px; background: var(--color-other-msg); }.message.user { border-color: color-mix(in srgb, var(--color-primary) 35%, transparent); border-top-left-radius: 8px; border-top-right-radius: 2px; background: var(--color-self-msg); }.message-meta { margin-bottom: 5px; color: var(--color-primary); font-size: 11px; font-weight: 600; }.message.user .message-meta { color: var(--color-text-muted); }.message-meta span { color: var(--color-primary); font-weight: 400; }.content { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; font-size: 14px; }
   .run-process { margin: 8px 0 10px; border: 1px solid color-mix(in srgb, var(--color-primary) 22%, var(--color-border)); border-radius: 6px; background: color-mix(in srgb, var(--color-input) 78%, transparent); overflow: hidden; }.run-process > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: var(--color-primary); cursor: pointer; list-style-position: inside; user-select: none; }.process-title { font-size: 12px; font-weight: 700; }.process-count { margin-left: auto; color: var(--color-text-muted); font-size: 10px; }.run-meta { display:flex; flex-wrap:wrap; gap:5px; padding: 0 10px 7px; }.run-meta span { padding:2px 5px; border:1px solid var(--color-border); border-radius:3px; color:var(--color-text-muted); font-size:10px; }.trace-steps { display: grid; gap: 5px; padding: 0 7px 8px; }.trace-step { border-left: 2px solid var(--color-border); color: var(--color-text-muted); font-size: 12px; line-height: 1.55; }.trace-step > summary { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; list-style: none; user-select: none; }.trace-step > summary::-webkit-details-marker, .run-process > summary::-webkit-details-marker { display: none; }.trace-step > summary::before, .run-process > summary::before { content: '›'; color: var(--color-text-muted); font-size: 16px; transition: transform .15s ease; }.trace-step[open] > summary::before, .run-process[open] > summary::before { transform: rotate(90deg); }.step-icon { display: inline-grid; width: 19px; height: 19px; place-items: center; border-radius: 4px; background: color-mix(in srgb, var(--color-primary) 17%, var(--color-input)); color: var(--color-primary); font-size: 10px; font-weight: 700; }.trace-step > div { max-height: 260px; overflow: auto; padding: 0 9px 8px 33px; white-space: pre-wrap; overflow-wrap: anywhere; }.trace-step.thought { border-left-color: var(--color-primary); }.trace-step.dialogue { display: flex; gap: 7px; padding: 6px 8px; }.trace-step.dialogue > div { max-height: none; padding: 0; }.trace-step.tool { border-left-color: color-mix(in srgb, var(--color-online) 65%, var(--color-border)); }.tool-name { color: var(--color-text); font-weight: 600; }.tool-type { padding: 2px 5px; border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-text-muted); font-size: 10px; }.tool-status { margin-left: auto; color: var(--color-online); font-size: 10px; }.tool-waiting { color: var(--color-warning, #d99b36); }.tool-detail { padding-bottom: 8px !important; }.tool-label { margin: 4px 0 3px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; }.tool-detail pre { max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-bg); color: var(--color-text); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }.tool-summary, .tool-result { margin-top: 5px; color: var(--color-text-muted); font-size: 11px; }.trace-empty { padding: 0 10px 9px; color: var(--color-text-muted); font-size: 11px; }.final-result { padding-top: 9px; border-top: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent); }.result-label { margin-bottom: 4px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .5px; }
   .run-error { padding: 0 16px 8px; font-size: 12px; }.composer { display: flex; flex-shrink: 0; gap: 8px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--color-border); background: var(--color-surface); }.composer textarea { flex: 1; min-width: 0; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-input); color: var(--color-text); font: inherit; padding: 9px 10px; resize: none; outline: none; }.composer textarea:focus { border-color: var(--color-primary); }.composer > button { align-self: end; min-width: 54px; border-color: var(--color-primary); background: var(--color-primary); color: #fff; font-weight: 700; }.composer > button.cancel { border-color: var(--color-error); background: transparent; color: var(--color-error); }
-  @media (max-width: 600px) { .conversation-sidebar { flex-basis:112px; }.conversation-sidebar-heading { padding:0 7px; }.conversation-items { padding:5px; }.conversation-items button { padding:7px 5px; font-size:11px; }.agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.agent-status { grid-template-columns:1fr; gap:7px; margin-inline:12px; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
+  @media (max-width: 600px) { .conversation-sidebar { flex-basis:112px; }.conversation-sidebar-heading { padding:0 7px; }.conversation-items { padding:5px; }.conversation-items button { padding:7px 5px; font-size:11px; }.agent-toolbar { padding: 0 10px; }.agent-purpose, .state { display: none; }.toolbar-actions { margin-left: auto; }.toolbar-actions .delete { padding: 0 6px; }.messages { padding: 14px 0; }.message-row { padding: 0 12px; }.message { max-width: 82%; }.system-info,.agent-status { margin-inline:12px; }.agent-status { gap:16px; }.composer { padding: 10px calc(10px + env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px)); } }
 </style>
