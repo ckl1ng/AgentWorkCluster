@@ -57,6 +57,14 @@ class GatewayTest(unittest.TestCase):
         self.assertNotEqual(channel_scope_key("agent-1", first), channel_scope_key("agent-2", first))
         self.assertNotEqual(channel_scope_key("agent-1", first), channel_scope_key("agent-1", second))
 
+    def test_channel_conversation_mapping_can_be_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GatewayStore(directory + "/gateway.db", Fernet.generate_key().decode("ascii"))
+            store.save_conversation("qq:agent:group:group-1", "deleted-conversation", "agent", 7)
+            store.save_conversation("qq:agent:group:group-1", "replacement-conversation", "agent", 7)
+            self.assertEqual(store.get_conversation("qq:agent:group:group-1"), "replacement-conversation")
+            store.db.close()
+
     def test_inbox_and_outbound_are_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             store = GatewayStore(directory + "/gateway.db", Fernet.generate_key().decode("ascii"))

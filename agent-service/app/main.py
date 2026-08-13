@@ -3655,9 +3655,9 @@ async def create_channel_event(raw_payload: Dict[str, Any] = Body(...), authoriz
     conversation = None
     if payload.conversation_id:
         conversation = database().get_conversation(payload.conversation_id, payload.owner_user_id)
-        if conversation is None or conversation["agent_id"] != payload.agent_id:
+        if conversation is not None and conversation["agent_id"] != payload.agent_id:
             raise HTTPException(status_code=409, detail="Channel 会话映射无效")
-    else:
+    if conversation is None:
         conversation = database().create_conversation(payload.agent_id, payload.owner_user_id, payload.title)
         if conversation is not None:
             database().set_conversation_channel(conversation["id"], payload.owner_user_id, payload.provider, payload.scope_type, payload.scope_id)

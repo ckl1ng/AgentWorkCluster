@@ -6,6 +6,7 @@ import unittest
 from cryptography.fernet import Fernet
 
 from app.harness import execute_local_tool
+import app.main as main
 from app.main import AgentStore, channel_message_content, runtime_system_messages
 
 
@@ -38,6 +39,35 @@ class AutonomousStatusTest(unittest.TestCase):
     def test_group_message_content_includes_sender_name(self):
         self.assertEqual(channel_message_content("请帮忙", "group", "张三", "member-1"), "张三：请帮忙")
         self.assertEqual(channel_message_content("你好", "c2c", "李四", "user-1"), "你好")
+
+    def test_deleted_channel_conversation_id_is_recreated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AgentStore(directory + "/agent.db", Fernet.generate_key().decode("ascii"))
+            agent = store.create_agent(7, payload())
+            deleted = store.create_conversation(agent["id"], 7, "QQ group")
+            self.assertTrue(store.delete_conversation(deleted["id"], 7))
+            previous_store, previous_secret, previous_enqueue = main.store, main.settings.service_secret, main.enqueue_run
+
+            async def enqueue_without_worker(_):
+                return None
+
+            try:
+                main.store = store
+                main.settings.service_secret = "test-service-secret"
+                main.enqueue_run = enqueue_without_worker
+                result = asyncio.run(main.create_channel_event({
+                    "provider": "qq", "bot_id": "bot-1", "event_id": "event-1", "event_type": "GROUP_AT_MESSAGE_CREATE",
+                    "scope_type": "group", "scope_id": "group-1", "sender_id": "member-1", "member_name": "张三",
+                    "content": "你好", "agent_id": agent["id"], "owner_user_id": 7, "conversation_id": deleted["id"],
+                }, authorization="Service test-service-secret"))
+            finally:
+                main.store, main.settings.service_secret, main.enqueue_run = previous_store, previous_secret, previous_enqueue
+
+            self.assertNotEqual(result["conversation_id"], deleted["id"])
+            recreated = store.get_conversation(result["conversation_id"], 7)
+            self.assertEqual(recreated["source"], "qq_group")
+            self.assertEqual(recreated["channel_scope_id"], "group-1")
+            self.assertEqual(store.model_messages(recreated["id"], 0)[0]["content"], "张三：你好")
 
     def test_schedule_idempotency_and_due_claim(self):
         with tempfile.TemporaryDirectory() as directory:

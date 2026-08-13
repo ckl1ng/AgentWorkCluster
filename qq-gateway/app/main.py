@@ -679,7 +679,10 @@ async def process_event(event: NormalizedEvent, runtime: "QQRuntime") -> None:
         async with await scope_lock_for(scope_key):
             conversation_id = store.get_conversation(scope_key)
             result = await submit_to_agent(event, config, conversation_id)
-            if not conversation_id and result.get("conversation_id"):
+            # A user may permanently delete an Agent conversation while this
+            # mapping remains in the gateway. The Agent API recreates it and
+            # returns the replacement ID; always persist that authoritative ID.
+            if result.get("conversation_id") and result["conversation_id"] != conversation_id:
                 store.save_conversation(scope_key, result["conversation_id"], config.agent_id, config.owner_user_id)
         run_id = str(result["run_id"])
         store.mark_run(event.event_key, run_id)
