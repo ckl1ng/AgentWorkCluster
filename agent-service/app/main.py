@@ -156,8 +156,8 @@ BUILTIN_TOOLS = [
     },
     {
         "name": "web_fetch", "description": "抓取并提取公开网页内容。", "kind": "mcp_stdio",
-        "config": {"command": "uvx", "args": ["mcp-server-fetch"], "remote_tool_name": "fetch", "timeout_seconds": 30, "source": "mcp-server-fetch"},
-        "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}, "max_length": {"type": "integer", "minimum": 1, "maximum": 100000}}, "required": ["url"], "additionalProperties": False},
+        "config": {"builtin": "web_fetch", "command": "uvx", "args": ["--from", "mcp-server-fetch==2026.7.10", "--with", "mcp<2", "mcp-server-fetch"], "remote_tool_name": "fetch", "timeout_seconds": 30, "source": "mcp-server-fetch"},
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string", "format": "uri"}, "max_length": {"type": "integer", "minimum": 1, "maximum": 100000}, "raw": {"type": "boolean", "description": "返回原始网页内容，不进行正文提取。"}}, "required": ["url"], "additionalProperties": False},
         "confirmation_mode": "none", "side_effect": "read", "provider_version": "mcp-stdio-fetch-v1",
     },
     {

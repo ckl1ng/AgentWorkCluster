@@ -2,10 +2,11 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 
-from app.harness import ModelTurn, prepare_context, tool_declarations
+from app.harness import ModelTurn, _stdio_request, execute_stdio_mcp_tool, prepare_context, tool_declarations
 from app.main import AgentStore
 from app import main
 
@@ -122,6 +123,41 @@ class PhaseAStorageTest(unittest.TestCase):
 
 
 class PhaseAHarnessTest(unittest.TestCase):
+    def test_stdio_mcp_error_result_is_not_reported_as_success(self):
+        tool = {
+            "name": "fetch", "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+            "config": {"command": "tool", "remote_tool_name": "fetch"},
+        }
+        response = {"result": {"isError": True, "content": [{"type": "text", "text": "fetch failed"}]}}
+        with patch("app.harness._execute_mcp_stdio", new=AsyncMock(return_value=response)):
+            with self.assertRaisesRegex(RuntimeError, "fetch failed"):
+                asyncio.run(execute_stdio_mcp_tool(tool, {}, 1024))
+
+    def test_stdio_request_uses_jsonl_framing(self):
+        class Writer:
+            def __init__(self):
+                self.data = b""
+
+            def write(self, data):
+                self.data += data
+
+            async def drain(self):
+                pass
+
+        class Reader:
+            async def readline(self):
+                return b'{"jsonrpc":"2.0","id":1,"result":{}}\n'
+
+        class Process:
+            def __init__(self):
+                self.stdin = Writer()
+                self.stdout = Reader()
+
+        process = Process()
+        result = asyncio.run(_stdio_request(process, {"jsonrpc": "2.0", "id": 1, "method": "initialize"}, 1))
+        self.assertEqual(result["id"], 1)
+        self.assertEqual(process.stdin.data, b'{"jsonrpc":"2.0","id":1,"method":"initialize"}\n')
+
     def test_context_budget_keeps_the_newest_task_and_reports_trimming(self):
         history = [{"role": "user", "content": "old-{} ".format(index) * 200} for index in range(10)]
         history.append({"role": "user", "content": "newest task must survive"})

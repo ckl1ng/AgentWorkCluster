@@ -394,8 +394,9 @@ async def _stdio_request(process: asyncio.subprocess.Process, request: Dict[str,
     """Send one JSON-RPC request, accepting both newline and Content-Length MCP framing."""
     if process.stdin is None or process.stdout is None:
         raise RuntimeError("MCP STDIO pipes are unavailable")
+    # Python MCP servers use newline-delimited JSON over stdio.
     encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    process.stdin.write(("Content-Length: {}\r\n\r\n".format(len(encoded))).encode("ascii") + encoded)
+    process.stdin.write(encoded + b"\n")
     await process.stdin.drain()
 
     async def read_response() -> Dict[str, Any]:
@@ -451,11 +452,17 @@ async def _execute_mcp_stdio(config: Dict[str, Any], method: str, params: Dict[s
         }}, timeout)
         # MCP servers require this notification before serving requests.
         if process.stdin is not None:
-            notification = b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
-            process.stdin.write(("Content-Length: {}\r\n\r\n".format(len(notification))).encode("ascii") + notification)
+            notification = b'{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n'
+            process.stdin.write(notification)
             await process.stdin.drain()
         return await _stdio_request(process, {"jsonrpc": "2.0", "id": 2, "method": method, "params": params}, timeout)
     finally:
+        if process.stdin is not None:
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         if process.returncode is None:
             process.kill()
         await process.wait()
@@ -521,7 +528,12 @@ async def execute_stdio_mcp_tool(tool: Dict[str, Any], arguments: Dict[str, Any]
     )
     if response.get("error"):
         raise RuntimeError("MCP error: " + str(response["error"].get("message", "unknown"))[:300])
-    content = json.dumps(response.get("result", {}), ensure_ascii=False).encode("utf-8")
+    result = response.get("result", {})
+    if isinstance(result, dict) and result.get("isError"):
+        items = result.get("content") or []
+        message = next((str(item.get("text", "")) for item in items if isinstance(item, dict) and item.get("text")), "unknown")
+        raise RuntimeError("MCP tool error: " + message[:300])
+    content = json.dumps(result, ensure_ascii=False).encode("utf-8")
     if len(content) > response_limit:
         raise RuntimeError("MCP response exceeded configured limit")
     return {"status": "ok", "content_type": "application/json", "content": response_summary(content, "application/json")}

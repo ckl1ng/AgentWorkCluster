@@ -44,6 +44,27 @@ wait_for_http() {
   return 1
 }
 
+managed_client_is_running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid state command
+  pid="$(tr -d '[:space:]' <"$PID_FILE")"
+  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
+    rm -f "$PID_FILE"
+    return 1
+  fi
+  state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+  if [[ -z "$state" || "$state" == Z* ]]; then
+    rm -f "$PID_FILE"
+    return 1
+  fi
+  command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  if [[ "$command" != *"$VITE_BIN"* ]]; then
+    echo "PID 文件 $PID_FILE 指向非预期进程 $pid；请先人工确认后再处理。" >&2
+    return 2
+  fi
+  return 0
+}
+
 if [[ ! -x "$VITE_BIN" ]]; then
   echo "未找到 Vite。请先执行：npm install" >&2
   exit 1
@@ -51,6 +72,19 @@ fi
 if ! command -v curl >/dev/null 2>&1; then
   echo "缺少 curl，无法检查前端启动状态。" >&2
   exit 1
+fi
+if managed_client_is_running; then
+  if wait_for_http; then
+    echo "Chat Client 已在运行：PID $(<"$PID_FILE")，http://$VITE_HOST:$VITE_PORT"
+    exit 0
+  fi
+  echo "检测到已记录的前端进程但健康检查失败；请先执行 ./stop.sh。" >&2
+  exit 1
+else
+  client_state=$?
+  if [[ "$client_state" -eq 2 ]]; then
+    exit 1
+  fi
 fi
 if port_in_use "$VITE_PORT"; then
   echo "端口 $VITE_PORT 已被占用；若前端已运行，请先执行 ./stop.sh。" >&2

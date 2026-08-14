@@ -31,8 +31,8 @@ Browser
 
 ### 前置条件
 
-- Rust 工具链（构建 `chat-server`）
-- Python 3.12+ 和 `pip`
+- Rust 工具链（仅在仓库未包含可执行 `chat-server` 时用于构建）
+- Python 3.10+
 - Node.js 18+、npm
 - `curl`；生产模式额外需要 PostgreSQL、Redis、Docker/Caddy 或 systemd
 
@@ -42,12 +42,10 @@ Browser
 cd /home/zhouzw/agentWorkCluster
 cp chat-server/.agent.env.example chat-server/.agent.env
 # 编辑 chat-server/.agent.env，设置 AGENT_SERVICE_SECRET 和 AGENT_MASTER_KEY
-python3 -m pip install -r agent-service/requirements.txt
-cd chat-client && npm ci && cd ..
 ./start.sh
 ```
 
-脚本先启动 `chat-server`（Rust 聊天服务 `9012`、Agent API `9011`，配置 Redis 时也启动 Worker），再启动 Vite `3000`。浏览器访问 `http://127.0.0.1:3000`。
+`start.sh` 会在首次运行时创建项目私有 `.venv`、安装 Agent/QQ Gateway Python 依赖、安装并预热 `uvx` 的 `web_fetch` MCP 工具（包括正文提取依赖），并执行前端 `npm ci`。随后启动 `chat-server`（Rust 聊天服务 `9012`、Agent API `9011`，配置 Redis 时也启动 Worker）、可选 QQ Gateway 和 Vite `3000`。浏览器访问 `http://127.0.0.1:3000`。
 
 ```bash
 ./stop.sh

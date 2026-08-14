@@ -4,6 +4,7 @@
 .agent.env
 .frontend.env
 .runtime/
+.tools/
 *.log
 *.pid
 
