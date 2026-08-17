@@ -68,7 +68,7 @@ AgentWorkCluster 是一个由四个可独立演进的子系统组成的协作产
 | `chat-server/` | Rust 2021、Axum 0.7、Tokio、redb、bcrypt、tracing | `chat.db`（redb） | 用户/好友/群、普通聊天 REST/WS、聊天密文存储、Agent 用户身份 introspection |
 | `agent-service/` | Python、FastAPI、uvicorn、httpx、cryptography、jsonschema、Alembic、psycopg、redis | PostgreSQL（生产）或 SQLite（开发） | Agent、Run、工具、记忆、Task、Local Agent 控制面、调度、WebSocket、审计 |
 | `qq-gateway/` | Python、FastAPI、websockets、httpx、Fernet | `qq-gateway.db`（SQLite） | QQ OAuth/WS、事件去重、被动回复、群/成员登记、主动投递、QQ 凭据隔离 |
-| `local-agent/` | Node.js 18+、ESM、`ws`、Node IPC/fs | `~/.local-agent` 私有文件 | 本机 daemon、设备凭据、本机工作区、本机模型密钥、文本模型运行 |
+| `local-agent/` | Node.js 18+、ESM、`ws`、Node IPC/fs | `~/.local-agent` 私有文件 | 本机 daemon、设备凭据、本机工作区、本机模型密钥、文本模型运行、Codex 外部执行器 |
 | `chat-server/Caddyfile` | Caddy 2 | 无 | 公网反代：聊天域、Agent/Task/Local Agent API 和 WS 路由；当前文件不托管 SPA 静态文件 |
 
 ### 3.1 前端：`chat-client/`
@@ -224,7 +224,7 @@ Local Agent 将本机设备暴露为受控执行器，但控制面仍在 Agent A
 5. Web/CLI Run 通过本机 IPC 汇聚到一个 daemon；远端 Run 通过 lease claim、周期续租、单调事件 sequence 和 finish 上报。
 6. `local_direct` 的模型 API Key 仅在本机加密保存，服务端只登记 Base URL 与模型 ID；`server_proxy` 是控制面可选项，但当前 daemon 不执行它。
 
-**当前实际边界**：已实现的是本机直连模型的文本 Run。尚未实现本机文件/进程工具、终端工具确认、可靠断线恢复；因此它不是通用远程代码执行器。
+**当前实际边界**：已实现的是本机直连模型的文本 Run，以及 `codex` 执行器（把运行委托给本机 Codex 外部 CLI agent，在已注册工作区内黑盒运行，其内部工具不受平台治理）。尚未实现本机文件/进程工具、终端工具确认、可靠断线恢复；因此它不是通用远程代码执行器。
 
 ## 4. 关键端到端数据流
 
@@ -291,7 +291,7 @@ QQ official Gateway event
 浏览器创建 local_direct Run
   -> Agent API 写 local_run_dispatch (不进入 Cloud Worker)
   -> 已连接 daemon 收到 offer，claim 90 秒 lease
-  -> daemon 在已注册工作区内调用本机模型
+  -> daemon 在已注册工作区内调用本机模型，或按 executor_kind 委托给 Codex 外部 CLI agent
   -> WSS run.event / run.finish
   -> Agent API 持久化轨迹和终态，浏览器照常通过 /agent/ws 观察
 ```
@@ -386,7 +386,7 @@ Caddy 和 Vite proxy 都必须同步新增 Agent API 前缀及 WebSocket 路径�
 - QQ 主动群消息依赖 QQ 官方平台权限；平台拒绝不能由本产品代码绕过。
 - QQ “已观察成员”不是全量群成员目录，只来自本机器人已收到的事件；昵称可能重复，工具执行依赖完整 OpenID。
 - 定时任务是一次性提醒，不是 Cron/周期任务；内部 UTC 存储是实现细节，用户/模型输入输出一律北京时间。
-- Local Agent 当前只执行本机文本模型 Run，不支持文件、Git、终端或进程工具，不支持完整断线恢复。
+- Local Agent 默认执行本机文本模型 Run，另支持 `codex` 执行器（把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内、内部工具不受平台治理）；不支持文件、Git、终端或进程工具，不支持完整断线恢复。
 - 普通聊天 E2EE 不覆盖 Agent、Task、QQ 或 Local Agent Run；这些内容会按 Agent 平台策略发送给模型和加密保存。
 - Rust 聊天服务的 REST 限流是进程内实现；多副本部署如需全局限流，应在网关或共享存储层增强。
 - `agent-service/app/main.py` 是当前集成中枢，结构性扩展应优先抽离清晰领域模块，同时保持 API、迁移和事件契约兼容。

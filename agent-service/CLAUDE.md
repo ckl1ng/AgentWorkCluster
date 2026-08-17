@@ -124,7 +124,7 @@ Task 是归属用户、有明确提出者（`proposer_kind`: user/agent）的工
 - `execution_target=cloud|local`；本地绑定时 `model_mode=server_proxy`（服务端持有密钥代跑）或 `local_direct`（模型密钥只留本机 daemon，服务端快照**不含** API key，绑定前必须已登记本地模型且该 Agent 从未提交服务端密钥）。
 - 配对流程：`start_pairing` 生成一次性 pairing secret + 6 位码（`LA-xxxxxx`）→ 用户 `approve_pairing` → daemon `claim_pairing` 换取设备凭据。
 - 派发：run 创建即写 `local_run_dispatches`（pending）→ daemon 经 WebSocket `offer_local_run` 拿 90s 租约 → `claim_local_run`（原子地把 run 置 running）→ 周期 `lease.renew` → `run.event` 增量上报 → `run.finish`。
-- **当前限制**（不可描述为生产远程执行）：Local Agent 只执行文本模型运行；不支持本机文件/进程工具、终端确认、断线恢复。
+- **当前限制**（不可描述为生产远程执行）：Local Agent 默认执行文本模型运行，另支持 `codex` 执行器（把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内、内部工具不受平台治理）；尚无本机文件/进程工具、终端确认、断线恢复。
 
 ### 8. 评估与发布门禁
 

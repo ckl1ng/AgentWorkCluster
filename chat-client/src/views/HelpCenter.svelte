@@ -91,7 +91,7 @@ curl http://127.0.0.1:9013/healthz</code></pre>
       <section id="local">
         <p class="eyebrow">LOCAL AGENT</p><h3>本地执行与项目 CLI</h3>
         <p><code>local-agent</code> 是位于服务端项目 <code>local-agent/</code> 的 Node.js daemon/CLI。daemon 是同一台电脑上的唯一执行进程：网页创建的本地运行和终端创建的运行都通过它管理。本地目录绝对路径与模型 API Key 不会上传到 Agent API。</p>
-        <div class="callout warning"><strong>当前范围</strong><span>当前 Local Agent 只执行文本模型运行。它不提供本机文件编辑、进程执行、终端工具调用、工具确认或断线恢复；不要将其作为生产远程执行器部署。</span></div>
+        <div class="callout warning"><strong>当前范围</strong><span>当前 Local Agent 默认执行文本模型运行，另支持 <code>codex</code> 执行器（把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内，内部工具不受平台逐工具治理）。它不提供本机文件编辑、进程执行、终端工具调用、工具确认或断线恢复；不要将其作为生产远程执行器部署。</span></div>
 
         <h4>部署 daemon</h4>
         <p>在需要执行任务的电脑部署 CLI，不要将它放进 Agent API 容器。该电脑需要 Node.js 18+，并且能访问对外网关。网关必须转发 <code>/api/v1/local-agent*</code> 与 <code>/local-agent/ws*</code>；生产环境使用网关 URL，不要向外暴露内部 Agent API 的 <code>9011</code> 端口。</p>
@@ -128,10 +128,10 @@ node bin/local-agent.js workspace list</code></pre>
         <p>工作区注册会解析真实目录并拒绝不存在的路径。服务端不会保存绝对路径；<code>workspace list</code> 也不会显示它。未配对时可先添加本地工作区，完成配对后重新执行添加命令以同步控制面。</p>
 
         <h4>在网页绑定本地 Agent</h4>
-        <p>在“配置 → 本地执行”选择已批准的设备和已同步的工作区，然后选择模型模式并点击“绑定本地执行”。<code>local_direct</code> 要求在本机为该 Agent 配置模型凭据，并且是当前唯一会被服务端派发给 daemon 的本地执行模式。界面仍提供 <code>server_proxy</code>（使用服务端已有模型连接）作为控制面选项，但当前版本不会将该模式的本地运行派发给 daemon；要实际运行请使用 <code>local_direct</code>。</p>
+        <p>在“配置 → 本地执行”选择已批准的设备和已同步的工作区，然后选择模型模式并点击“绑定本地执行”。<code>local_direct</code> 是当前唯一会被服务端派发给 daemon 的本地执行模式；界面仍提供 <code>server_proxy</code>（使用服务端已有模型连接）作为控制面选项，但当前版本不会将该模式的本地运行派发给 daemon。选择 <code>local_direct</code> 后还可指定执行器：<code>model</code>（默认，需在本机为此 Agent 配置模型凭据）或 <code>codex</code>（把运行委托给本机 Codex 外部 CLI agent，在已注册工作区内作为黑盒执行器运行，其内部工具不受平台逐工具治理，服务端不保存 Codex 凭据或模型 Key）。</p>
 
         <h4>配置本机直连模型</h4>
-        <p>先完成配对并保持 daemon 运行。将 API Key 放在环境变量中，避免它出现在 shell 历史中；默认变量名是 <code>LOCAL_AGENT_MODEL_API_KEY</code>，可用 <code>--api-key-env</code> 指定其他变量名。</p>
+        <p>该步骤仅适用于 <code>model</code> 执行器。先完成配对并保持 daemon 运行。将 API Key 放在环境变量中，避免它出现在 shell 历史中；默认变量名是 <code>LOCAL_AGENT_MODEL_API_KEY</code>，可用 <code>--api-key-env</code> 指定其他变量名。若绑定的是 <code>codex</code> 执行器，则不需要为本 Agent 登记模型凭据。</p>
         <pre><code>export LOCAL_AGENT_MODEL_API_KEY='your-model-key'
 node bin/local-agent.js model set AGENT_ID \
   --base-url https://model.example/v1 \

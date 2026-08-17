@@ -249,7 +249,7 @@ node bin/local-agent.js run attach run_xxx
 
 命令总览：`auth login` / `auth status`、`daemon` / `status`、`workspace add` / `workspace list`、`model set` / `model list` / `model remove`、`run` / `run list` / `run events` / `run attach`。除 `auth` 和 `daemon` 外，大多数命令通过 `~/.local-agent/daemon.sock` 与 daemon 通信；看到 `connect ENOENT ... daemon.sock` 时，应先启动 daemon。
 
-当前 Local Agent 仅支持文本模型运行，不支持本机文件或进程工具、终端工具确认和断线恢复，不能作为生产远程执行器部署。私聊和群聊的端到端加密边界不覆盖 Agent run：任务、必要上下文和已授权工具结果会按 Agent 平台策略发送给模型服务并保存审计记录。
+当前 Local Agent 默认执行文本模型运行，另支持 `codex` 执行器（把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内、内部工具不受平台治理）；不支持本机文件或进程工具、终端工具确认和断线恢复，不能作为生产远程执行器部署。私聊和群聊的端到端加密边界不覆盖 Agent run：任务、必要上下文和已授权工具结果会按 Agent 平台策略发送给模型服务并保存审计记录。
 
 `local_direct` 要求 Agent 从未保存服务端模型 Key。当前网页“创建 Agent”表单仍要求 API Key，因此新建纯本地 Agent 需要通过 Agent API 以无 API Key、`execution_target=local`、`model_mode=local_direct` 创建；已经保存服务端 Key 的 Agent 不能改绑为 `local_direct`。
 

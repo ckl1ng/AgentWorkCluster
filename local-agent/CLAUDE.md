@@ -24,7 +24,7 @@
 
 ## 产品边界
 
-`local_direct` 才会被服务器派发给 daemon。`server_proxy` 不是本机运行模式。当前只执行文本模型运行，不得实现或宣传本机文件/进程工具、工具确认或断线恢复，除非服务端契约和安全模型一并扩展。
+`local_direct` 才会被服务器派发给 daemon。`server_proxy` 不是本机运行模式。执行器（`executor_kind`）在 Agent 绑定处选择：`model` 运行内置本地文本模型，`codex` 把运行委托给本机 Codex 外部 CLI agent（黑盒、工作区内、内部工具不受平台治理）。除 `codex` 外，不得实现或宣传本机文件/进程工具、工具确认或断线恢复，除非服务端契约和安全模型一并扩展。
 
 本地 `ws_...` ID 与网页的远端工作区 ID 是两套标识：CLI 发起 `run` 使用本地 ID；远程派发由 daemon 通过 `remote_id` 映射回来，不能混用。
 

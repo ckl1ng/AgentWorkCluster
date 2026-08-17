@@ -318,6 +318,7 @@ class AgentStore:
                   encrypted_api_key BLOB NOT NULL, temperature REAL NOT NULL,
                   max_tokens INTEGER NOT NULL, timeout_seconds INTEGER NOT NULL,
                   system_prompt TEXT NOT NULL DEFAULT '', encrypted_system_prompt BLOB,
+                  executor_kind TEXT NOT NULL DEFAULT 'model',
                   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS agent_versions (
@@ -537,6 +538,7 @@ class AgentStore:
             self._ensure_column("agents", "default_device_id", "TEXT")
             self._ensure_column("agents", "default_workspace_id", "TEXT")
             self._ensure_column("agents", "model_mode", "TEXT NOT NULL DEFAULT 'server_proxy'")
+            self._ensure_column("agents", "executor_kind", "TEXT NOT NULL DEFAULT 'model'")
             self._ensure_column("runs", "usage", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column("runs", "attempt", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("runs", "task_id", "TEXT")
@@ -1838,6 +1840,7 @@ class AgentStore:
             "default_device_id": data.get("default_device_id"),
             "default_workspace_id": data.get("default_workspace_id"),
             "model_mode": data.get("model_mode", "server_proxy"),
+            "executor_kind": data.get("executor_kind", "model"),
             "created_at": created_at,
             "updated_at": created_at,
         }
@@ -1847,12 +1850,12 @@ class AgentStore:
                    current_version, model_display_name, model_base_url, model_id, encrypted_api_key,
                    temperature, max_tokens, timeout_seconds, system_prompt, encrypted_system_prompt,
                    run_policy, memory_enabled,
-                   memory_retention_days, execution_target, default_device_id, default_workspace_id, model_mode, created_at, updated_at)
+                   memory_retention_days, execution_target, default_device_id, default_workspace_id, model_mode, executor_kind, created_at, updated_at)
                    VALUES (:id, :owner_user_id, :name, :description, :avatar_url, :state,
                    :current_version, :model_display_name, :model_base_url, :model_id, :encrypted_api_key,
                    :temperature, :max_tokens, :timeout_seconds, :system_prompt, :encrypted_system_prompt,
                    :run_policy, :memory_enabled,
-                   :memory_retention_days, :execution_target, :default_device_id, :default_workspace_id, :model_mode, :created_at, :updated_at)""",
+                   :memory_retention_days, :execution_target, :default_device_id, :default_workspace_id, :model_mode, :executor_kind, :created_at, :updated_at)""",
                 record,
             )
             self._ensure_builtin_tools()
@@ -2436,7 +2439,7 @@ All state-changing operations require structured, authorized tools and are check
         return {
             "run_id": row["run_id"], "lease_id": lease_id, "lease_expires_at": expires_at,
             "workspace_id": context["default_workspace_id"], "agent_id": context["agent_id"],
-            "profile": context["model_id"],
+            "profile": context["model_id"], "executor": context.get("executor_kind") or "model",
             "system_prompt": context["system_prompt"], "messages": history,
             "max_tokens": context["max_tokens"], "temperature": context["temperature"],
         }
@@ -2527,29 +2530,38 @@ All state-changing operations require structured, authorized tools and are check
             return False
         return submitted is not None
 
-    def bind_local_agent(self, agent_id: str, owner_id: int, device_id: str, workspace_id: str, model_mode: str) -> Optional[Dict[str, Any]]:
+    def bind_local_agent(self, agent_id: str, owner_id: int, device_id: str, workspace_id: str, model_mode: str, executor: str = "model") -> Optional[Dict[str, Any]]:
         device = self.get_local_device(device_id, owner_id)
         workspace = self.get_local_workspace(workspace_id, owner_id)
         if device is None or device.get("status") == "revoked" or workspace is None or workspace["device_id"] != device_id:
             raise ValueError("本地设备或工作区未找到")
+        if executor not in {"model", "codex"}:
+            raise ValueError("executor 无效")
         with self.lock:
             agent = self.db.execute("SELECT encrypted_api_key FROM agents WHERE id = ? AND owner_user_id = ?", (agent_id, owner_id)).fetchone()
             if agent is None:
                 return None
             if model_mode == "local_direct":
-                model = self.get_local_model(agent_id, owner_id, device_id)
-                if model is None:
-                    raise ValueError("该设备尚未登记本地模型凭据")
+                model = None
+                if executor == "model":
+                    model = self.get_local_model(agent_id, owner_id, device_id)
+                    if model is None:
+                        raise ValueError("该设备尚未登记本地模型凭据")
                 if self.decrypt_api_key(agent["encrypted_api_key"]):
                     raise ValueError("local_direct 只能绑定从未向服务端提交模型密钥的 Agent")
                 result = self.db.execute("""UPDATE agents SET execution_target = 'local', default_device_id = ?, default_workspace_id = ?,
-                    model_mode = 'local_direct', model_base_url = ?, model_id = ?, encrypted_api_key = ?, current_version = current_version + 1,
-                    updated_at = ? WHERE id = ? AND owner_user_id = ?""", (device_id, workspace_id, model["model_base_url"], model["model_id"], self.cipher.encrypt(b""), now(), agent_id, owner_id))
+                    model_mode = 'local_direct', model_base_url = ?, model_id = ?, encrypted_api_key = ?, executor_kind = ?,
+                    current_version = current_version + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?""",
+                    (device_id, workspace_id,
+                     (model["model_base_url"] if model else ""),
+                     (model["model_id"] if model else (device_id + "-codex")),
+                     self.cipher.encrypt(b""), executor, now(), agent_id, owner_id))
             else:
                 if not self.decrypt_api_key(agent["encrypted_api_key"]):
                     raise ValueError("server_proxy 需要服务端模型密钥")
                 result = self.db.execute("""UPDATE agents SET execution_target = 'local', default_device_id = ?, default_workspace_id = ?,
-                    model_mode = 'server_proxy', current_version = current_version + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?""", (device_id, workspace_id, now(), agent_id, owner_id))
+                    model_mode = 'server_proxy', executor_kind = ?, current_version = current_version + 1, updated_at = ? WHERE id = ? AND owner_user_id = ?""",
+                    (device_id, workspace_id, executor, now(), agent_id, owner_id))
             self.db.commit()
         return self.get_agent(agent_id, owner_id, include_private=True) if result.rowcount else None
 
@@ -3471,6 +3483,7 @@ class LocalBindPayload(BaseModel):
     device_id: str = Field(min_length=1, max_length=64)
     workspace_id: str = Field(min_length=1, max_length=64)
     model_mode: str = Field(default="server_proxy", pattern="^(server_proxy|local_direct)$")
+    executor: str = Field(default="model", pattern="^(model|codex)$")
 
 
 class AWCBindPayload(BaseModel):
@@ -3986,7 +3999,7 @@ async def disconnect_agent_qq(agent_id: str, authorization: Optional[str] = Head
 async def bind_local_agent(agent_id: str, payload: LocalBindPayload, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     user = await authenticated_user(authorization)
     try:
-        agent = database().bind_local_agent(agent_id, user["user_id"], payload.device_id, payload.workspace_id, payload.model_mode)
+        agent = database().bind_local_agent(agent_id, user["user_id"], payload.device_id, payload.workspace_id, payload.model_mode, payload.executor)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if agent is None:

@@ -7,7 +7,7 @@ import { WorkspaceRegistry, resolveWorkspacePath } from './workspace.js';
 import { assertPrivateFile, ensurePrivateDirectory } from './permissions.js';
 import { LocalModelStore } from './model-store.js';
 import { loadCredential } from './registry-client.js';
-import { executeTextRun } from './harness.js';
+import { executeExecutorRun } from './executor.js';
 import { LocalAgentTransport } from './transport.js';
 import crypto from 'node:crypto';
 
@@ -60,7 +60,7 @@ export class LocalAgentDaemon {
     if (method === 'run.list') return [...this.runs.values()];
     if (method === 'run.create') {
       const workspace = this.workspaces.get(params.workspace_id); if (!workspace) throw new Error('workspace not found');
-      const run = { run_id: `run_${crypto.randomUUID()}`, workspace_id: workspace.id, agent_id: params.agent_id || null, origin: params.origin || 'terminal', sync_mode: params.sync || 'full', prompt: String(params.prompt || ''), state: 'queued', created_at: new Date().toISOString(), last_sequence: 0 };
+      const run = { run_id: `run_${crypto.randomUUID()}`, workspace_id: workspace.id, agent_id: params.agent_id || null, executor: params.executor || 'model', origin: params.origin || 'terminal', sync_mode: params.sync || 'full', prompt: String(params.prompt || ''), state: 'queued', created_at: new Date().toISOString(), last_sequence: 0 };
       this.runs.set(run.run_id, run);
       const event = await this.journal.append({ run_id: run.run_id, type: 'run.created', payload: { workspace_id: run.workspace_id, agent_id: run.agent_id, origin: run.origin, sync_mode: run.sync_mode, prompt: run.prompt } });
       run.last_sequence = event.sequence;
@@ -75,14 +75,17 @@ export class LocalAgentDaemon {
     const emit = async (type, payload) => { const event = await this.journal.append({ run_id: run.run_id, type, payload }); run.last_sequence = event.sequence; if (onEvent) await onEvent(event); };
     const controller = new AbortController(); this.controllers.set(run.run_id, controller); run.state = 'running';
     try {
+      const executor = run.executor || run.executor_kind || 'model';
       let model = null;
-      try { model = await this.models.get(run.agent_id, this.localSecret); } catch (error) {
-        const credential = await loadCredential(this.paths.dataDir);
-        if (credential?.refresh_token) model = await this.models.get(run.agent_id, credential.refresh_token);
-        else throw error;
+      if (executor === 'model') {
+        try { model = await this.models.get(run.agent_id, this.localSecret); } catch (error) {
+          const credential = await loadCredential(this.paths.dataDir);
+          if (credential?.refresh_token) model = await this.models.get(run.agent_id, credential.refresh_token);
+          else throw error;
+        }
+        if (!model) throw new Error('no local model/profile is configured for this run');
       }
-      if (!model) throw new Error('no local model/profile is configured for this run');
-      const result = await executeTextRun({ run, workspace, model, signal: controller.signal, emit }); run.result = result.content; run.sanitized_result = result.sanitized_content;
+      const result = await executeExecutorRun({ run, workspace, model, signal: controller.signal, emit }); run.result = result.content; run.sanitized_result = result.sanitized_content;
       if (run.state !== 'cancelled') { run.state = 'completed'; await emit('agent.run.completed', { summary: '模型响应已完成' }); }
     } catch (error) {
       if (run.state !== 'cancelled') { run.state = 'failed'; run.error = error.name === 'AbortError' ? 'run cancelled' : error.message; await emit('agent.run.failed', { summary: run.error }); }
@@ -94,7 +97,7 @@ export class LocalAgentDaemon {
     const offer = this.pendingOffers.get(claim.run_id); this.pendingOffers.delete(claim.run_id); if (!offer || !claim.claimed) return;
     const workspace = this.workspaces.getByRemoteId(offer.workspace_id);
     if (!workspace) { this.transport.send('run.finish', { run_id: offer.run_id, lease_id: offer.lease_id, state: 'failed', error: 'workspace is not registered on this daemon' }); return; }
-    const run = { run_id: offer.run_id, lease_id: offer.lease_id, workspace_id: workspace.id, agent_id: offer.profile || offer.agent_id, origin: 'web', sync_mode: 'full', prompt: offer.messages?.at(-1)?.content || '', messages: [{ role: 'system', content: offer.system_prompt }, ...(offer.messages || [])], state: 'running', created_at: new Date().toISOString(), last_sequence: 0 };
+    const run = { run_id: offer.run_id, lease_id: offer.lease_id, workspace_id: workspace.id, agent_id: offer.profile || offer.agent_id, executor: offer.executor || 'model', origin: 'web', sync_mode: 'full', prompt: offer.messages?.at(-1)?.content || '', messages: [{ role: 'system', content: offer.system_prompt }, ...(offer.messages || [])], state: 'running', created_at: new Date().toISOString(), last_sequence: 0 };
     this.runs.set(run.run_id, run); this.transport.trackLease(run.run_id, run.lease_id);
     const finished = await this.executeRun(run, workspace, (event) => this.transport.send('run.event', { run_id: run.run_id, lease_id: run.lease_id, sequence: event.sequence, event_type: event.type, payload: event.payload }));
     this.transport.send('run.finish', { run_id: run.run_id, lease_id: run.lease_id, state: finished.state, content: finished.sanitized_result || '', error: finished.error || '' }); this.transport.untrackLease(run.run_id);

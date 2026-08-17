@@ -29,7 +29,7 @@ Task 集群通过 FastAPI 的 Task 状态机执行，拥有独立上下文、预
 
 `local-agent/` 是独立 Node.js daemon/CLI，应部署在本机执行任务的电脑上，而不是 Agent API 容器。生产控制面必须经对外网关转发 `/api/v1/local-agent*` 和 `/local-agent/ws*`；不得要求暴露内部 `9011`。前端已支持在 Agent 配置中批准配对、选择同步工作区、绑定 `server_proxy` 或 `local_direct`，运行工作台会显示本机派发状态；但当前仅 `local_direct` 会被服务端派发到 daemon。CLI 的实际参数以 `local-agent/src/cli.js` 为准；修改 CLI、设备/工作区 API 或本地派发时，必须同步更新 `chat-client/src/views/HelpCenter.svelte`、两个仓库的 README 和本文件。文档必须区分 CLI 的本地 `ws_...` 工作区 ID 与网页的远端工作区 ID，且不得描述已上线前端能力为“未实现”或把 `server_proxy` 说成已可本机运行。
 
-Local Agent 当前只执行文本模型运行。它不支持本机文件/进程工具、终端工具确认或断线恢复；不能将其描述为生产远程执行能力。模型 API Key 和绝对工作区路径只留在本机，不得记录、回显或提交。
+Local Agent 默认执行文本模型运行，另支持 `codex` 执行器（把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内、内部工具不受平台治理）。它不支持本机文件/进程工具、终端工具确认或断线恢复；不能将其描述为生产远程执行能力。模型 API Key、Codex 凭据和绝对工作区路径只留在本机，不得记录、回显或提交。
 
 ## 架构
 

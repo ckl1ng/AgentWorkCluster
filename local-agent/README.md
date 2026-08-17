@@ -55,6 +55,8 @@ awc profile list
 
 在网页完成 Agent 与已同步设备/工作区的 `local_direct` 绑定后，daemon 会接收远程运行。`server_proxy` 是控制面可选项，但当前版本不会由此 daemon 执行。
 
+执行器（executor）选择在 Agent 绑定处配置：`model`（默认）是内置的本地文本模型 harness；`codex` 会把运行委托给本机的 Codex 外部 CLI agent，在已注册工作区内作为黑盒执行器运行，其内部工具不进入平台逐工具治理，服务端也不保存 Codex 凭据。
+
 ## CLI
 
 ```text
@@ -81,7 +83,7 @@ awc run attach run_xxx
 
 ## 当前限制
 
-- 只支持文本模型运行。
+- 默认只支持文本模型运行（`model` 执行器）；`codex` 执行器把运行委托给本机 Codex 外部 CLI agent，黑盒、工作区内、内部工具不受平台治理。
 - 不支持本机文件或进程工具。
 - 不支持工具确认和断线恢复。
 - 运行事件、输出和日志会进行密钥与路径脱敏，但仍应避免在提示词中输入不必要的敏感信息。

@@ -143,6 +143,26 @@ class LocalAgentStoreTest(unittest.TestCase):
         self.assertTrue(self.store.claim_local_run(run["id"], device["id"], second["lease_id"], "session-1"))
         self.assertEqual(self.store.get_run(run["id"], 7)["state"], "running")
 
+    def test_codex_executor_bind_needs_no_local_model_and_offers_carry_executor(self):
+        codex_agent = self.store.create_agent(7, agent_payload(
+            name="Codex Agent", api_key="", execution_target="local", model_mode="local_direct",
+        ))
+        conversation = self.store.create_conversation(codex_agent["id"], 7)
+        device = self.store.create_local_device(7, {"display_name": "workstation"})
+        workspace = self.store.add_local_workspace(7, device["id"], {"display_name": "project"})
+
+        # codex executor binds without requiring a device-registered local model
+        bound = self.store.bind_local_agent(codex_agent["id"], 7, device["id"], workspace["id"], "local_direct", "codex")
+        self.assertEqual(bound["executor_kind"], "codex")
+        # server never holds a model key for a black-box external executor
+        self.assertFalse(bound["model"]["api_key_configured"])
+
+        run = self.store.create_run(conversation["id"], 7, "inspect tests")
+        offer = self.store.offer_local_run(device["id"])
+        self.assertEqual(offer["run_id"], run["id"])
+        self.assertEqual(offer["executor"], "codex")
+        self.assertNotIn("encrypted_api_key", self.store.run_snapshot(run["id"]))
+
     def test_local_direct_task_claim_and_completion_reaches_proposer_review(self):
         direct_agent = self.store.create_agent(7, agent_payload(
             name="Task Direct Agent", api_key="", execution_target="local", model_mode="local_direct",
