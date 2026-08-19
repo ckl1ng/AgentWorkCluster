@@ -107,6 +107,10 @@
   /** 创建群组 */
   async function createGroup() {
     error = '';
+    if (!$auth.secretKey) {
+      error = '此设备没有聊天密钥，无法创建群组';
+      return;
+    }
     if (!groupName.trim()) {
       error = '请输入群组名称';
       return;

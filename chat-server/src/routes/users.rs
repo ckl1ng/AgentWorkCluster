@@ -111,24 +111,10 @@ async fn login(
     let user = state.db.authenticate_password(username, &req.password)?;
     let token = crypto::generate_token();
     state.db.replace_user_token(user.id, &token)?;
-    let encrypted_secret_key = match state.db.get_encrypted_secret_key(user.id)? {
-        Some(value) => value,
-        None => {
-            let value = req.encrypted_secret_key.ok_or_else(|| {
-                AppError::Unauthorized("该账户需要在原设备登录一次以恢复加密密钥".to_string())
-            })?;
-            if value.is_empty() || value.len() > 512 {
-                return Err(AppError::BadRequest("加密密钥备份格式无效".to_string()));
-            }
-            state.db.save_encrypted_secret_key(user.id, &value)?;
-            value
-        }
-    };
     Ok(Json(LoginResponse {
         id: user.id,
         username: user.username,
         token,
-        encrypted_secret_key,
     }))
 }
 

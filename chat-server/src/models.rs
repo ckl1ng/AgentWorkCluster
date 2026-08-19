@@ -38,7 +38,6 @@ pub struct LoginResponse {
     pub id: i64,
     pub username: String,
     pub token: String,
-    pub encrypted_secret_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,7 +60,6 @@ pub struct UpdateAvatarRequest {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
-    pub encrypted_secret_key: Option<String>,
 }
 
 // ==================== 私聊消息 ====================

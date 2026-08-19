@@ -100,11 +100,10 @@ export const api = {
   },
 
   /** POST /login */
-  login(username, password, encryptedSecretKey) {
+  login(username, password) {
     return request('POST', '/login', {
       username,
       password,
-      ...(encryptedSecretKey ? { encrypted_secret_key: encryptedSecretKey } : {}),
     });
   },
 

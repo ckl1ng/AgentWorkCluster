@@ -24,7 +24,10 @@ fn generate_password() -> Result<String, String> {
         .collect())
 }
 
-fn reset_all_passwords(path: &Path) -> Result<Vec<(String, String)>, String> {
+fn reset_passwords(
+    path: &Path,
+    target_username: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
     let db = Database::open(path).map_err(|err| format!("无法打开数据库: {err}"))?;
 
     let users = {
@@ -47,8 +50,19 @@ fn reset_all_passwords(path: &Path) -> Result<Vec<(String, String)>, String> {
         users
     };
 
+    let users: Vec<UserRecord> = match target_username {
+        Some(username) => users
+            .into_iter()
+            .filter(|user| user.username == username)
+            .collect(),
+        None => users,
+    };
+
     if users.is_empty() {
-        return Err("数据库中没有可重置密码的账号".to_string());
+        return match target_username {
+            Some(username) => Err(format!("未找到账号: {username}")),
+            None => Err("数据库中没有可重置密码的账号".to_string()),
+        };
     }
 
     let credentials: Vec<(i64, String, String, String)> = users
@@ -88,15 +102,31 @@ fn main() {
     let mut args = env::args_os();
     let program = args.next().unwrap_or_default();
     let Some(database_path) = args.next() else {
-        eprintln!("用法: {} <chat.db 路径>", program.to_string_lossy());
+        eprintln!(
+            "用法: {} <chat.db 路径> [--username <用户名>]",
+            program.to_string_lossy()
+        );
         std::process::exit(2);
     };
-    if args.next().is_some() {
-        eprintln!("只接受一个 chat.db 路径参数");
-        std::process::exit(2);
+    let mut target_username = None;
+    while let Some(arg) = args.next() {
+        if arg == "--username" {
+            let Some(username) = args.next() else {
+                eprintln!("--username 需要提供用户名");
+                std::process::exit(2);
+            };
+            if target_username.replace(username).is_some() {
+                eprintln!("--username 只能提供一次");
+                std::process::exit(2);
+            }
+        } else {
+            eprintln!("未知参数: {}", arg.to_string_lossy());
+            std::process::exit(2);
+        }
     }
 
-    match reset_all_passwords(Path::new(&database_path)) {
+    let target_username = target_username.map(|value| value.to_string_lossy().into_owned());
+    match reset_passwords(Path::new(&database_path), target_username.as_deref()) {
         Ok(credentials) => {
             println!("# 已重置 {} 个账号的密码", credentials.len());
             println!("# 用户名\t新密码");

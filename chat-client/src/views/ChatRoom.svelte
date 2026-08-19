@@ -203,6 +203,10 @@
   }
 
   async function loadGroupKey(groupId) {
+    if (!$auth.secretKey) {
+      groupKeyError = '此设备没有聊天密钥，无法解密群消息';
+      return;
+    }
     loadingGroupKeyId = groupId;
     attemptedGroupKeyId = groupId;
     groupKeyError = '';
@@ -289,7 +293,7 @@
 
     let bytes = null;
 
-    if (chatType === 'private') {
+    if (chatType === 'private' && $auth.secretKey) {
       // 确定发送者和接收者的密钥
       const isSelf = msg.sender_id === $auth.id;
       if (isSelf) {
@@ -403,6 +407,10 @@
   }
 
   async function sendPayload(payload, contentType) {
+    if (!$auth.secretKey) {
+      sendError = '此设备没有聊天密钥，无法发送加密消息';
+      return;
+    }
     const now = new Date().toISOString();
     let encrypted, msgType, extraFields;
 

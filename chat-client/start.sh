@@ -95,7 +95,11 @@ mkdir -p "$RUNTIME_DIR"
 (
   cd "$ROOT_DIR"
   export CHAT_SERVER_URL AGENT_SERVER_URL
-  exec nohup "$VITE_BIN" --host "$VITE_HOST" --port "$VITE_PORT"
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid "$VITE_BIN" --host "$VITE_HOST" --port "$VITE_PORT" </dev/null
+  else
+    exec nohup "$VITE_BIN" --host "$VITE_HOST" --port "$VITE_PORT" </dev/null
+  fi
 ) >"$LOG_FILE" 2>&1 &
 
 VITE_PID=$!

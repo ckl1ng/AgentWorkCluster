@@ -49,7 +49,7 @@
             username: parsed.username,
             token: parsed.token,
             publicKey: base64ToBytes(parsed.publicKey),
-            secretKey: base64ToBytes(parsed.secretKey),
+            secretKey: parsed.secretKey ? base64ToBytes(parsed.secretKey) : null,
           });
         } catch {
           localStorage.removeItem('chat_auth');

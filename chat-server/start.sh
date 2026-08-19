@@ -167,7 +167,11 @@ fi
   export PORT="$CHAT_SERVER_PORT"
   export DATA_DIR="${DATA_DIR:-$ROOT_DIR/data}"
   export AGENT_SERVICE_SECRET
-  exec nohup "$SERVER_BIN"
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid "$SERVER_BIN" </dev/null
+  else
+    exec nohup "$SERVER_BIN" </dev/null
+  fi
 ) >"$RUNTIME_DIR/chat-server.log" 2>&1 &
 CHAT_PID=$!
 echo "$CHAT_PID" >"$RUNTIME_DIR/chat-server.pid"
@@ -179,7 +183,11 @@ echo "$CHAT_PID" >"$RUNTIME_DIR/chat-server.pid"
   export AGENT_DATABASE_PATH="${AGENT_DATABASE_PATH:-$ROOT_DIR/data/agents.db}"
   export CHAT_AUTH_INTROSPECTION_URL="${CHAT_AUTH_INTROSPECTION_URL:-http://127.0.0.1:$CHAT_SERVER_PORT/internal/v1/auth/introspect}"
   export AGENT_ALLOW_HTTP="${AGENT_ALLOW_HTTP:-false}"
-  exec nohup "$PYTHON_BIN" -m uvicorn app.main:app --app-dir "$AGENT_SERVICE_DIR" --host "$AGENT_API_HOST" --port "$AGENT_API_PORT"
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid "$PYTHON_BIN" -m uvicorn app.main:app --app-dir "$AGENT_SERVICE_DIR" --host "$AGENT_API_HOST" --port "$AGENT_API_PORT" </dev/null
+  else
+    exec nohup "$PYTHON_BIN" -m uvicorn app.main:app --app-dir "$AGENT_SERVICE_DIR" --host "$AGENT_API_HOST" --port "$AGENT_API_PORT" </dev/null
+  fi
 ) >"$RUNTIME_DIR/agent-api.log" 2>&1 &
 AGENT_PID=$!
 echo "$AGENT_PID" >"$RUNTIME_DIR/agent-api.pid"
@@ -191,7 +199,11 @@ if [[ -n "${REDIS_URL:-}" ]]; then
     cd "$AGENT_SERVICE_DIR"
     export AGENT_SERVICE_SECRET AGENT_MASTER_KEY AMAP_WEATHER_API_KEY AGENT_DATABASE_URL REDIS_URL PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
     export CHAT_AUTH_INTROSPECTION_URL="${CHAT_AUTH_INTROSPECTION_URL:-http://127.0.0.1:$CHAT_SERVER_PORT/internal/v1/auth/introspect}"
-    exec nohup "$PYTHON_BIN" -m app.worker
+    if command -v setsid >/dev/null 2>&1; then
+      exec setsid "$PYTHON_BIN" -m app.worker </dev/null
+    else
+      exec nohup "$PYTHON_BIN" -m app.worker </dev/null
+    fi
   ) >"$RUNTIME_DIR/agent-worker.log" 2>&1 &
   WORKER_PID=$!
   echo "$WORKER_PID" >"$RUNTIME_DIR/agent-worker.pid"

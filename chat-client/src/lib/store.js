@@ -9,7 +9,7 @@ import { base64ToBytes, bytesToBase64 } from './utils.js';
 
 // ── 认证 ──
 
-/** @type {import('svelte/store').Writable<{id:number,username:string,token:string,publicKey:Uint8Array,secretKey:Uint8Array}|null>} */
+/** @type {import('svelte/store').Writable<{id:number,username:string,token:string,publicKey:Uint8Array,secretKey:Uint8Array|null}|null>} */
 export const auth = writable(null);
 
 // ── 在线状态 ──

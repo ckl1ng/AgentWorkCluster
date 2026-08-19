@@ -1,7 +1,7 @@
 <script>
   import { auth } from '../lib/store.js';
   import { api } from '../lib/api.js';
-  import { decryptSecretKeyForPassword, encryptSecretKeyForPassword, generateKeyPair } from '../lib/crypto.js';
+  import { encryptSecretKeyForPassword, generateKeyPair } from '../lib/crypto.js';
   import { base64ToBytes, bytesToBase64 } from '../lib/utils.js';
 
   let username = '';
@@ -62,7 +62,7 @@
     }
   }
 
-  /** 使用用户名和密码登录，并自动恢复 E2EE 私钥 */
+  /** 使用用户名和密码登录；聊天私钥仅保留在当前设备。 */
   async function handleLogin() {
     error = '';
     if (!username.trim() || !password) {
@@ -72,18 +72,15 @@
 
     loading = true;
     try {
-      let legacyBackup = null;
+      let localSecretKey = null;
       try {
         const stored = JSON.parse(localStorage.getItem('chat_auth') || 'null');
         if (stored?.username === username.trim() && stored.secretKey) {
-          legacyBackup = await encryptSecretKeyForPassword(base64ToBytes(stored.secretKey), password);
+          const key = base64ToBytes(stored.secretKey);
+          if (key.length === 32) localSecretKey = key;
         }
-      } catch { /* The server backup remains the source of truth. */ }
-      const data = await api.login(username.trim(), password, legacyBackup);
-      const secretKey = await decryptSecretKeyForPassword(data.encrypted_secret_key, password);
-      if (!secretKey || secretKey.length !== 32) {
-        throw new Error('无法恢复加密密钥，请确认账号和密码');
-      }
+      } catch { /* A missing local key must not prevent account login. */ }
+      const data = await api.login(username.trim(), password);
       localStorage.setItem('chat_token', data.token);
       const me = await api.getMe();
       const publicKey = base64ToBytes(me.public_key);
@@ -93,7 +90,7 @@
         username: data.username,
         token: data.token,
         publicKey: bytesToBase64(publicKey),
-        secretKey: bytesToBase64(secretKey),
+        ...(localSecretKey ? { secretKey: bytesToBase64(localSecretKey) } : {}),
       };
       localStorage.setItem('chat_auth', JSON.stringify(authData));
 
@@ -103,7 +100,7 @@
         username: data.username,
         token: data.token,
         publicKey,
-        secretKey,
+        secretKey: localSecretKey,
       });
     } catch (e) {
       error = e.message || '登录失败';
